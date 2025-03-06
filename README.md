@@ -81,7 +81,7 @@ Technical implementation: Streamlit will allow us to write pure Python functions
 
 Ensuring the UI is not overly complex will make it easier to maintain. It will serve as a foundation that can be extended as needed (for example, adding a login screen, theming, or more interactivity later on). Most importantly, it provides a user-friendly way to interact with the scheduling logic we implement.
 
-6. Project Structure and Setup
+# 6. Project Structure and Setup
 
 Project Structure: The repository will be organized to separate concerns (API integration, scheduling logic, UI, etc.) and include configuration files for easy setup. A possible structure is:
 
@@ -123,7 +123,7 @@ To help users get started, the README will provide step-by-step guidance:
 
 By following the README, even a non-developer should be able to set up the tool locally. The language will be kept simple, and possibly screenshots (if allowed) might be added later for clarity (for example, showing where in Google Console to click). Additionally, the README will list the tested environment (OS, Python version) and how to report issues or contribute.
 
-7. Roadmap and Future Enhancements
+# 7. Roadmap and Future Enhancements
 
 This project is intentionally scoped to be lightweight and focused, but there are many opportunities to expand or improve it over time. The roadmap for potential enhancements includes:
 	•	Outlook Calendar Integration: Extend support to Microsoft Outlook/Office 365 calendars. This would involve connecting to the Microsoft Graph API in a similar way to Google’s. The code structure (using a separate module for calendar integration) will make it easier to plug in a new provider. In the future, a user could choose to connect their Outlook account in addition to or instead of Google. This opens the tool to more users and use-cases. Integrating Outlook via Graph API would similarly allow creating, reading, and managing events within the app ￼.
@@ -145,3 +145,9 @@ References:
 	•	Atomic is an example of an open-source AI scheduler positioned as an alternative to Motion and Reclaim ￼, indicating the interest in self-hosted scheduling tools.
 	•	A developer demonstrated pulling Google Calendar data and visualizing it with Streamlit, showing that a lightweight calendar dashboard is feasible ￼.
 	•	The design anticipates future Outlook Calendar support; integrating Outlook via Microsoft Graph API would similarly allow managing events within the app ￼.
+
+
+# Parking Lot 
+## Initial Prompt
+
+I'm looking to build something simple that would allow me to more easily schedule interviews for tech companies, especially when they require more extensive preparation and scheduling of the preparation as well as the thing itself. So, to do that, I would like as a first step to connect somehow to Google Calendar and maybe Outlook. I want to connect to multiple calendars if possible, download them, and then try to find the appropriate date to conduct my interview, given that I have specified some calendars and I want, for example, a given time between them. So, for example, maybe I want to prepare for 30 hours or for 50 hours before the full interview loop and so on. So, as a first step, I would like you to write down a plan of how to conduct this project. So, maybe the first step would be something like calendar connectivity and downloads, overall project structure, where I want it to be quite lightweight, but still kind of robust enough so I can download multiple calendars and connect to them and see my existing commitments and then try to fit things the best. So, as a first step, I would like you to write a project plan with a README that would be used in further steps. So, it might be that I want to download these calendars or have access to the API, maybe, possibly. You have to also tell me what credentials I need, how do I put them in the .env environmental file and things like that. So, maybe the first step would be just kind of this document setup where we outline the steps we're going to take. So, first this part and then start thinking about the scheduling problem itself, how to fit it into my day and weeks and so on. Could you start on this? Basically, this is the project I want to build; help me plan it and start executing it. I want to implement it in Python. It would be like, feel free to think about also what kind of optimization libraries we you can use for the scheduling part if needed or just have some simple algorithm for scheduling to start with. And regarding the UI, I want to use Streamlit to just make it simple and easy to start with. but if you have better options also tell me. Just don't over complicate things but make it comprehensive and easy for me to get started with it. a like some some tools which are kind of comparable or for example motion I think I think there is something called reclaim.ai and... Yeah, maybe you can also look for kind of open source alternatives to Motion that I can integrate but the main use case would be to sort of try to schedule interviews while planning and flexibly some some kind of preparation time for for interviews without scheduling it explicitly. it's more like I just need to have a bunch of time for the preparation as a buffer before the interview itself.
