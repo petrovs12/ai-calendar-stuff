@@ -31,11 +31,11 @@ def get_calendar_service():
                     "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
                     "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                     "token_uri": "https://oauth2.googleapis.com/token",
-                    "redirect_uris": ["http://localhost"]
+                    "redirect_uris": ["http://localhost:62753"]
                 }
             }
             flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
-            creds = flow.run_local_server(port=0)  # Opens browser for authentication
+            creds = flow.run_local_server(port=62753)  # Opens browser for authentication
         # Save the credentials for the next run
         with open("token.json", "w") as token_file:
             token_file.write(creds.to_json())
