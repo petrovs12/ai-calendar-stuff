@@ -1,6 +1,21 @@
-streamlit>=1.30.0
-google-api-python-client>=2.100.0
-google-auth-httplib2>=0.1.0
-google-auth-oauthlib>=1.0.0
-python-dotenv>=1.0.0
-watchdog>=3.0.0 
+# Note: SQLite3 is included in the Python Standard Library and does not require a separate installation.
+streamlit
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+python-dotenv
+
+# Additional libraries for constraint programming and data science utilities
+python-constraint
+plotly
+matplotlib
+numpy
+pandas
+ortools
+minizinc
+docplex
+setuptools
+dspy
+openai
+watchdog
+mlflow>=2.18.0

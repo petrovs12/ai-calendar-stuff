@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 def schedule_practice(events, duration_minutes=60, days_ahead=14):
     """
@@ -32,7 +32,16 @@ def schedule_practice(events, duration_minutes=60, days_ahead=14):
             start_dt = datetime.fromisoformat(start_str)
             end_dt = datetime.fromisoformat(end_str)
         # Only consider events within the next 'days_ahead' days
-        if start_dt.date() > datetime.now().date() + timedelta(days=days_ahead):
+        # Ensure we're comparing timezone-aware datetimes by making now timezone-aware
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if start_dt.tzinfo is not None:
+            # If start_dt has a timezone, make it timezone-naive for consistent comparison
+            start_dt = start_dt.replace(tzinfo=None)
+        if end_dt.tzinfo is not None:
+            # If end_dt has a timezone, make it timezone-naive for consistent comparison
+            end_dt = end_dt.replace(tzinfo=None)
+            
+        if start_dt.date() > now.date() + timedelta(days=days_ahead):
             continue
         day = start_dt.date()
         busy_times.setdefault(day, []).append((start_dt, end_dt))

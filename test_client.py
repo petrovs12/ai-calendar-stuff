@@ -33,7 +33,7 @@ def main():
             
             try:
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    'credentials.json', SCOPES)
+                    'credentials_desktop.json', SCOPES)
                 creds = flow.run_local_server(port=0)
                 print("Authentication successful!")
             except Exception as e:
