@@ -163,3 +163,6 @@ credentials.json
 *credentials*.json
 *credentials*.pickle
 *token*.pickle
+mlflow/
+mlruns/
+py310env/
