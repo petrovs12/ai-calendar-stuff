@@ -565,3 +565,4 @@ if __name__ == "__main__":
         print("Sample projects added.")
         
     rint("Done. You can now run the application with 'streamlit run app.py'.")
+    print("Done. You can now run the application with 'streamlit run app.py'.")

@@ -1,3 +1,4 @@
+from collections import defaultdict
 import streamlit as st
 import sqlite3
 import logging
@@ -287,11 +288,9 @@ if active_tab == "Calendar":
                         st.subheader("Upcoming Events:")
                         
                         # Group events by calendar
-                        events_by_calendar: Dict[str, List[CalendarEvent]] = {}
+                        events_by_calendar: Dict[str, List[CalendarEvent]] = defaultdict(list)
                         for event in events:
-                            calendar_id = event.get('calendar_id', '')
-                            if calendar_id not in events_by_calendar:
-                                events_by_calendar[calendar_id] = []
+                            calendar_id = event.calendar_id
                             events_by_calendar[calendar_id].append(event)
                         
                         # Display events for each calendar
