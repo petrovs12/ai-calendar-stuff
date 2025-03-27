@@ -46,7 +46,7 @@ class EventClassification(dspy.Signature):
 # Initialize MLflow
 def init_mlflow():
     """
-    Initialize MLflow configuration
+    Initialize MLflow configuration with autolog
     
     Returns:
         Boolean indicating if MLflow was successfully initialized
@@ -54,6 +54,8 @@ def init_mlflow():
     try:
         # Set the tracking URI to the MLflow server
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        # Set up autologging for DSPy
+        mlflow.dspy.autolog()
         
         # Create or get the experiment
         experiment = mlflow.get_experiment_by_name(EXPERIMENT_NAME)
@@ -69,6 +71,9 @@ def init_mlflow():
     except Exception as e:
         logger.error(f"Error initializing MLflow: {e}")
         return False
+
+# Initialize MLflow at module load time
+init_mlflow()
 
 # Configure OpenAI API for DSPy
 api_key = os.getenv("OPENAI_API_KEY", "")
@@ -88,7 +93,6 @@ def configure_dspy(model_name: str = None, api_key: str = None):
     # Use provided values or fall back to environment variables
     current_model = model_name or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     current_api_key = api_key or os.getenv("OPENAI_API_KEY", "")
-    
     
     logger.info(f"Creating LM with model: {current_model}")
     
@@ -229,102 +233,73 @@ def classify_event(event_title: str, event_description: str = "", event_calendar
     projects_list = ", ".join(project_names)
     
     try:
-        # Initialize MLflow
-        init_mlflow()
+        # Make the prediction
+        logger.info(f"Sending classification request to OpenAI with {len(project_names)} projects")
         
-        # Start an MLflow run
-        run_name = f"classify_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        with mlflow.start_run(run_name=run_name,nested=True):
-            # Log parameters to MLflow
-            mlflow.log_param("event_title", event_title)
-            if event_description:
-                mlflow.log_param("has_description", True)
-            mlflow.log_param("model", st.session_state.get('dspy_model_name', 'unknown'))
-            
-            # Make the prediction
-            logger.info(f"Sending classification request to OpenAI with {len(project_names)} projects")
-            
-            # Log the exact input being sent to the model
-            logger.debug(f"Classification input: event='{input_text}', projects='{projects_list}'")
-            
-            # Make the prediction
-            result = classify_module(event=input_text, projects=projects_list)
-            
-            # Log the raw result for debugging
-            logger.debug(f"Raw classification result: {result}")
-            
-            # Extract project name and confidence
-            predicted_project = result.project.strip() if hasattr(result, 'project') else "unknown"
-            
-            # Parse confidence with better error handling
-            confidence = 0.0
-            try:
-                if hasattr(result, 'confidence'):
-                    confidence_str = str(result.confidence).strip()
-                    # Remove any % signs
-                    confidence_str = confidence_str.replace('%', '')
-                    confidence = float(confidence_str)
-                    
-                    # If confidence is in 0-1 range, convert to 0-100
-                    if 0 <= confidence <= 1:
-                        confidence *= 100
+        # Log the exact input being sent to the model
+        logger.debug(f"Classification input: event='{input_text}', projects='{projects_list}'")
+        
+        # Make the prediction
+        result = classify_module(event=input_text, projects=projects_list)
+        
+        # Log the raw result for debugging
+        logger.debug(f"Raw classification result: {result}")
+        
+        # Extract project name and confidence
+        predicted_project = result.project.strip() if hasattr(result, 'project') else "unknown"
+        
+        # Parse confidence with better error handling
+        confidence = 0.0
+        try:
+            if hasattr(result, 'confidence'):
+                confidence_str = str(result.confidence).strip()
+                # Remove any % signs
+                confidence_str = confidence_str.replace('%', '')
+                confidence = float(confidence_str)
                 
-                # Ensure confidence is within 0-100 range
-                confidence = max(0, min(100, confidence))
-            except (ValueError, TypeError, AttributeError) as e:
-                logger.warning(f"Could not parse confidence score: {e}. Using 0.0")
-                confidence = 0.0
+                # If confidence is in 0-1 range, convert to 0-100
+                if 0 <= confidence <= 1:
+                    confidence *= 100
             
-            # Log prediction to MLflow
-            mlflow.log_param("predicted_project", predicted_project)
-            mlflow.log_metric("confidence", confidence)
-            if hasattr(result, 'explanation'):
-                mlflow.log_text(result.explanation, "explanation.txt")
-            
-            logger.info(f"Model returned project '{predicted_project}' with confidence {confidence:.2f}")
-            
-            # Check if prediction is reliable
-            if predicted_project.lower() == "unknown" or confidence < CONFIDENCE_THRESHOLD:
-                logger.info(f"Classification uncertain: project='{predicted_project}', confidence={confidence:.2f}")
-                mlflow.log_metric("classification_success", 0)
-                return None, confidence
-            
-            # Find the project ID by name (case-insensitive)
-            project_id = None
-            for name, pid in project_ids.items():
-                if name == predicted_project.lower():
-                    project_id = pid
-                    break
-            
-            if project_id:
-                logger.info(f"Classified event as project ID {project_id} with confidence {confidence:.2f}")
-                mlflow.log_metric("classification_success", 1)
-                mlflow.log_param("project_id", project_id)
-                return project_id, confidence
-            else:
-                logger.warning(f"Predicted project '{predicted_project}' not found in database")
-                mlflow.log_metric("classification_success", 0)
-                return None, confidence
+            # Ensure confidence is within 0-100 range
+            confidence = max(0, min(100, confidence))
+        except (ValueError, TypeError, AttributeError) as e:
+            logger.warning(f"Could not parse confidence score: {e}. Using 0.0")
+            confidence = 0.0
+        
+        logger.info(f"Model returned project '{predicted_project}' with confidence {confidence:.2f}")
+        
+        # Check if prediction is reliable
+        if predicted_project.lower() == "unknown" or confidence < CONFIDENCE_THRESHOLD:
+            logger.info(f"Classification uncertain: project='{predicted_project}', confidence={confidence:.2f}")
+            return None, confidence
+        
+        # Find the project ID by name (case-insensitive)
+        project_id = None
+        for name, pid in project_ids.items():
+            if name == predicted_project.lower():
+                project_id = pid
+                break
+        
+        if project_id:
+            logger.info(f"Classified event as project ID {project_id} with confidence {confidence:.2f}")
+            return project_id, confidence
+        else:
+            logger.warning(f"Predicted project '{predicted_project}' not found in database")
+            return None, confidence
     except Exception as e:
         logger.error(f"Error during prediction: {e}")
         logger.exception(str(e))
-        try:
-            with mlflow.start_run(run_name=f"error_{datetime.now().strftime('%Y%m%d_%H%M%S')}",nested=True):
-                mlflow.log_param("error", str(e))
-                mlflow.log_param("event_title", event_title)
-                mlflow.log_metric("classification_success", 0)
-        except Exception as mlflow_e:
-            logger.error(f"Error logging to MLflow: {mlflow_e}")
         return None, 0.0
 
-def batch_classify_events(event_list, lm=None, run_name=None):
+def batch_classify_events(event_list, lm=None, run_name=None) -> Dict[Any, Tuple[Optional[int], float]]:
     """
     Classify a batch of events
     
     Args:
         event_list: List of event dictionaries with title, description (optional), and calendar_id (optional)
         lm: The language model to use (optional, defaults to session state LM)
-        run_name: Optional custom name for the parent run
+        run_name: Optional custom name for the parent run (unused, kept for API compatibility)
         
     Returns:
         Dictionary of results with event IDs as keys and (project_id, confidence) as values
@@ -336,46 +311,35 @@ def batch_classify_events(event_list, lm=None, run_name=None):
             return {}
         lm = st.session_state.dspy_lm
     
-    # Generate a run name if not provided
-    if not run_name:
-        run_name = f"batch_classify_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
     results = {}
     
-    # Initialize MLflow
-    init_mlflow()
+    # Classify each event
+    logger.info(f"Batch classifying {len(event_list)} events")
+    for i, event in enumerate(event_list):
+        # Limit batch size for testing - remove this in production
+        if i > 3:  # Process just a few events to avoid hitting rate limits
+            logger.info(f"Stopping batch after {i} events")
+            break
+            
+        title = event.get('title', '')
+        description = event.get('description', '')
+        calendar_id = event.get('calendar_id', '')
+        event_id = event.get('id', i)
+        
+        # Classify the event using the same LM
+        project_id, confidence = classify_event(
+            title, 
+            description, 
+            calendar_id, 
+            lm=lm
+        )
+        
+        # Store the result
+        results[event_id] = (project_id, confidence)
     
-    # Create a parent run for all classifications in this batch
-    with mlflow.start_run(run_name=run_name,nested=True):
-        # Log batch information
-        mlflow.log_param("batch_size", len(event_list))
-        mlflow.log_param("model", st.session_state.get('dspy_model_name', 'unknown'))
-        mlflow.log_param("timestamp", datetime.now().isoformat())
-        
-        # Classify each event
-        for i, event in enumerate(event_list):
-            if i > 2:
-                break
-            title = event.get('title', '')
-            description = event.get('description', '')
-            calendar_id = event.get('calendar_id', '')
-            event_id = event.get('id', i)
-            
-            # Classify the event using the same LM
-            project_id, confidence = classify_event(
-                title, 
-                description, 
-                calendar_id, 
-                lm=lm
-            )
-            
-            # Store the result
-            results[event_id] = (project_id, confidence)
-        
-        # Log summary metrics
-        classified_count = sum(1 for _, (pid, _) in results.items() if pid is not None)
-        mlflow.log_metric("total_classified", classified_count)
-        mlflow.log_metric("classification_rate", classified_count / len(event_list) if event_list else 0)
+    # Log summary
+    classified_count = sum(1 for _, (pid, _) in results.items() if pid is not None)
+    logger.info(f"Batch classification complete. {classified_count}/{len(results)} events classified.")
     
     return results
 

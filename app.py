@@ -57,22 +57,13 @@ with st.sidebar:
                 st.session_state.dspy_configured = False
             st.rerun()
 
-# MLflow Information
+# MLflow Information (simplified - just informational)
 st.sidebar.header("MLflow Tracking")
 MLFLOW_PORT = 5000
 MLFLOW_URL = f"http://127.0.0.1:{MLFLOW_PORT}"
 st.sidebar.info(f"MLflow UI: [Open MLflow Dashboard]({MLFLOW_URL})")
 
-# Check if MLflow server is running
-try:
-    import requests
-    mlflow_status = requests.get(MLFLOW_URL, timeout=1)
-    if mlflow_status.status_code == 200:
-        st.sidebar.success("MLflow server is running")
-    else:
-        st.sidebar.warning(f"MLflow server returned status code: {mlflow_status.status_code}")
-except:
-    st.sidebar.error("MLflow server is not running. Please start it with 'mlflow ui'")
+# No need to check if MLflow server is running, since autolog will handle it gracefully
 
 def store_events_in_db(events, db_path="planner.db"): 
     """Store calendar events in the SQLite database using the events table defined in database.py."""

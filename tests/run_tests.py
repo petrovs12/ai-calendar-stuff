@@ -25,12 +25,13 @@ def main():
     elif args.test == "mlflow":
         print("Testing MLflow configuration...")
         if test_mlflow():
-            print("MLflow test successful!")
+            print("MLflow test successful! MLflow is configured and ready.")
         else:
             print("MLflow test failed. Check logs for details.")
     elif args.test == "experiment":
-        print("Creating test MLflow experiment...")
+        print("Creating test data for MLflow experiment...")
         create_test_experiment()
+        print("Test complete. Check MLflow UI to see the logged data.")
     elif args.test == "unittest":
         import unittest
         from test_classification import TestClassification
@@ -44,12 +45,15 @@ def main():
         import classification
         
         # Configure DSPy
-        classification.configure_dspy()
+        lm = classification.configure_dspy()
+        if not lm:
+            print("Failed to configure DSPy. Test cannot continue.")
+            return
         
         # Test a simple classification
         test_event = "Weekly team meeting with engineering"
         print(f"Classifying test event: '{test_event}'")
-        project_id, confidence = classification.classify_event(test_event)
+        project_id, confidence = classification.classify_event(test_event, lm=lm)
         
         if project_id is not None:
             print(f"Classification result: Project ID {project_id}, Confidence {confidence:.2f}%")
