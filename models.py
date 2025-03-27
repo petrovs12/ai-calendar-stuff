@@ -32,7 +32,7 @@ class CalendarEventTime(BaseModel):
     Model for calendar event time information.
     Can handle both dateTime and date-only formats from Google Calendar.
     """
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, arbitrary_types_allowed=True)
     
     # Original string representations from Google Calendar API
     date_time: Optional[str] = Field(default=None, alias="dateTime")
@@ -110,7 +110,7 @@ class CalendarEvent(BaseModel):
     throughout the application, providing consistent validation and serialization.
     """
     # Configuration for ORM mode
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, arbitrary_types_allowed=True)
     
     # Core Google Calendar fields
     id: str
@@ -346,7 +346,7 @@ class CalendarEvent(BaseModel):
 class Project(BaseModel):
     """Model for a project."""
     # Configuration for ORM mode
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, arbitrary_types_allowed=True)
     
     id: Optional[int] = None
     name: str
@@ -389,3 +389,5 @@ class EventClassificationResult(BaseModel):
         # Default threshold (can be made configurable)
         THRESHOLD = 70.0
         return self.confidence >= THRESHOLD
+
+    model_config = ConfigDict(from_attributes=True, arbitrary_types_allowed=True)

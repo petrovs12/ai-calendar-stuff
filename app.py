@@ -301,8 +301,8 @@ if active_tab == "Calendar":
                             with st.expander(f"{calendar_id} ({len(calendar_events)} events)", expanded=True):
                                 for event in calendar_events:
                                     # Extract event start time
-                                    start_time: str = event.get('start', {}).get('dateTime', "No date")
-                                    summary: str = event.get('summary', "No title")
+                                    start_time: str = event.start.date_time # event.get('start', {}).get('dateTime', "No date")
+                                    summary: str = event.summary #get('summary', "No title")
                                     st.write(f"{start_time} - {summary}")
                         
                         # Fix the scheduler to use Pydantic models
@@ -322,6 +322,7 @@ if active_tab == "Calendar":
                                 st.write("No available free slots found for practice sessions.")
                         except Exception as e:
                             logger.error(f"Error generating schedule suggestions: {e}")
+                            logger.exception(str(e))
                             st.error(f"Error generating schedule: {e}")
                 except Exception as e:
                     logger.error(f"Error in schedule generation: {e}")

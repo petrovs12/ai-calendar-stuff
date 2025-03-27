@@ -6,6 +6,7 @@ import logging
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from datetime import timezone
 
 # Import our Pydantic models
 from models import CalendarEvent
@@ -32,6 +33,11 @@ class DateTimeComponents(TypedDict):
     """Simplified datetime components extracted from an event."""
     dt: datetime.datetime  # Native Python datetime object
     time_of_day: str       # 'morning', 'afternoon', or 'evening'
+
+def ensure_aware(dt: datetime.datetime) -> datetime.datetime:
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 def parse_datetime(dt_str: str) -> datetime.datetime:
     """

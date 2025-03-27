@@ -50,6 +50,13 @@ def schedule_practice(events, duration_minutes=60, days_ahead=14):
                         
                     start_time = datetime.fromisoformat(start_str)
                     end_time = datetime.fromisoformat(end_str)
+                    
+                    # Convert to naive datetime if timezone-aware
+                    if start_time.tzinfo is not None:
+                        start_time = start_time.replace(tzinfo=None)
+                    if end_time.tzinfo is not None:
+                        end_time = end_time.replace(tzinfo=None)
+                        
                     busy_times.append((start_time, end_time))
                 except Exception as e:
                     print(f"Error parsing event times: {e}")
@@ -59,13 +66,19 @@ def schedule_practice(events, duration_minutes=60, days_ahead=14):
             end_dt = getattr(event, 'end_dt', None)
             
             if start_dt and end_dt:
+                # Convert to naive datetime if timezone-aware
+                if start_dt.tzinfo is not None:
+                    start_dt = start_dt.replace(tzinfo=None)
+                if end_dt.tzinfo is not None:
+                    end_dt = end_dt.replace(tzinfo=None)
+                    
                 busy_times.append((start_dt, end_dt))
     
     # Sort busy times by start time
     busy_times.sort()
     
     # Define the range to check for available slots
-    now = datetime.now()
+    now = datetime.now().replace(tzinfo=None)  # Ensure now is naive
     end_date = now + timedelta(days=days_ahead)
     
     # Generate potential practice slots
