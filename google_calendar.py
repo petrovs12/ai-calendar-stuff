@@ -7,6 +7,9 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+# Import our Pydantic models
+from models import CalendarEvent
+from timeutils import get_time_of_day, TimeOfDay
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -18,44 +21,6 @@ SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
 class CalendarDateTime(TypedDict):
     """Calendar date/time representation with native datetime as primary field."""
     native_dt: datetime.datetime  # Native Python datetime object (primary field)
-
-class CalendarEventAttendee(TypedDict):
-    email: str
-    responseStatus: Optional[str]
-    displayName: Optional[str]
-    self: Optional[bool]
-    organizer: Optional[bool]
-    resource: Optional[bool]
-
-class CalendarEvent(TypedDict):
-    """Google Calendar event with native datetime objects."""
-    kind: str
-    etag: str
-    id: str
-    status: str
-    htmlLink: Optional[str]
-    created: str
-    updated: str
-    summary: str
-    description: Optional[str]
-    location: Optional[str]
-    creator: Dict[str, Any]
-    organizer: Dict[str, Any]
-    start: CalendarDateTime
-    end: CalendarDateTime
-    start_dt: datetime.datetime     # Native start datetime
-    end_dt: datetime.datetime       # Native end datetime
-    recurringEventId: Optional[str]
-    originalStartTime: Optional[CalendarDateTime]
-    iCalUID: str
-    sequence: int
-    attendees: Optional[List[CalendarEventAttendee]]
-    extendedProperties: Optional[Dict[str, Any]]
-    hangoutLink: Optional[str]
-    conferenceData: Optional[Dict[str, Any]]
-    reminders: Optional[Dict[str, Any]]
-    eventType: str
-    calendarId: Optional[str]  # Added by our code, not part of Google API
 
 class CalendarInfo(TypedDict):
     id: str
@@ -91,24 +56,6 @@ def parse_datetime(dt_str: str) -> datetime.datetime:
     except Exception as e:
         logger.warning(f"Could not parse datetime string: {dt_str}, {e}")
         return datetime.datetime.now()
-
-def get_time_of_day(dt: datetime.datetime) -> str:
-    """
-    Get time of day category based on hour.
-    
-    Args:
-        dt: Datetime object
-        
-    Returns:
-        String representing time of day: 'morning', 'afternoon', or 'evening'
-    """
-    hour = dt.hour
-    if 5 <= hour < 12:
-        return 'morning'
-    elif 12 <= hour < 17:
-        return 'afternoon'
-    else:
-        return 'evening'
 
 def extract_datetime_components(event: Dict[str, Any]) -> DateTimeComponents:
     """
@@ -249,44 +196,32 @@ def list_calendars(service) -> List[CalendarInfo]:
             logger.info(f"Calendar: {calendar_summary} (ID: {calendar_id}, Primary: {is_primary})")
         
         # Sort calendars to put primary calendar first
-        formatted_calendars.sort(key=lambda x: (not x.get('primary', False), x.get('summary', '')))
-        
+        formatted_calendars.sort(key=lambda c: (not c['primary'], c['summary']))
         return formatted_calendars
     except Exception as e:
         logger.error(f"Error listing calendars: {e}")
-        raise
+        return []
 
-def fetch_events(service, max_results: int = 10, calendar_ids: Optional[List[str]] = None,days_lookahead: int = 60) -> List[CalendarEvent]:
-    """
-    Fetch upcoming events from the specified calendars.
-    
-    Args:
-        service: Authenticated Google Calendar API service instance.
-        max_results: Maximum number of events to return per calendar.
-        calendar_ids: List of calendar IDs to fetch events from. If None, only primary calendar is used.
-        
-    Returns:
-        A list of events from all specified calendars with native datetime objects.
-    """
-    # If no calendar IDs provided, use primary calendar
+def fetch_events(service: Any, max_results: int = 100, calendar_ids: Optional[List[str]] = None, days_lookahead: int = 90) -> List[CalendarEvent]:
+    """Fetch events from specified calendars."""
     if not calendar_ids:
         calendar_ids = ['primary']
-        logger.info("No calendar IDs provided, using primary calendar")
-    else:
-        logger.info(f"Fetching events from {len(calendar_ids)} calendars: {calendar_ids}")
     
+    # Calculate time bounds
     now = datetime.datetime.utcnow().isoformat() + 'Z'  # 'Z' indicates UTC time
-    logger.info(f"Fetching events starting from {now}")
+    future = (datetime.datetime.utcnow() + datetime.timedelta(days=days_lookahead)).isoformat() + 'Z'
     
-    all_events: List[CalendarEvent] = []
+    # Fetch events from all specified calendars
+    all_events = []
     
-    # Fetch events from each calendar
     for calendar_id in calendar_ids:
-        logger.info(f"Fetching up to {max_results} events from calendar {calendar_id}")
         try:
+            logger.info(f"Fetching events from calendar: {calendar_id}")
+            
             events_result = service.events().list(
                 calendarId=calendar_id,
                 timeMin=now,
+                timeMax=future,
                 maxResults=max_results,
                 singleEvents=True,
                 orderBy='startTime'
@@ -295,92 +230,39 @@ def fetch_events(service, max_results: int = 10, calendar_ids: Optional[List[str
             events = events_result.get('items', [])
             logger.info(f"Found {len(events)} events in calendar {calendar_id}")
             
-            # Add calendar ID and native datetime objects to each event
+            # Process each event
             for event in events:
-                event['calendarId'] = calendar_id
+                # Add calendar ID to the event
+                event['calendar_id'] = calendar_id
+                # Create a CalendarEvent using the Pydantic model
+                calendar_event = CalendarEvent.from_google_dict(event)
+                all_events.append(calendar_event)
                 
-                # Parse start time
-                if 'start' in event:
-                    start = event['start']
-                    
-                    # Extract the string representation
-                    start_str = start.get('dateTime', start.get('date', ''))
-                    
-                    # Parse into a native datetime
-                    start_dt = parse_datetime(start_str)
-                    
-                    # Add native datetime to both the start dict and event root
-                    start['native_dt'] = start_dt
-                    event['start_dt'] = start_dt
-                
-                # Parse end time
-                if 'end' in event:
-                    end = event['end']
-                    
-                    # Extract the string representation
-                    end_str = end.get('dateTime', end.get('date', ''))
-                    
-                    # Parse into a native datetime
-                    end_dt = parse_datetime(end_str)
-                    
-                    # Add native datetime to both the end dict and event root
-                    end['native_dt'] = end_dt
-                    event['end_dt'] = end_dt
-                
-                # Log the event
-                event_id = event.get('id', 'unknown')
-                summary = event.get('summary', 'No title')
-                logger.debug(f"Event: {summary} at {event['start_dt']} (ID: {event_id})")
-            
-            all_events.extend(events)
         except Exception as e:
             logger.error(f"Error fetching events from calendar {calendar_id}: {e}")
-            print(f"Error fetching events from calendar {calendar_id}: {e}")
+            logger.exception(e)
     
-    # Sort all events by start datetime
-    # Ensure we're comparing datetimes with consistent timezone awareness
-    # Use a timezone-naive datetime as default to avoid comparison issues
-    default_dt = datetime.datetime.now().replace(tzinfo=None)
-    # Sort events by start datetime (handling None values and timezone info)
-    # all_events.sort(key=lambda x: x.get('start_dt', default_dt).replace(tzinfo=None) if x.get('start_dt') else default_dt)
-    # logger.info(f"Total events fetched from all calendars: {len(all_events)}")
-    
-    # Filter events to only include those in the next 60 days
-    max_date = default_dt + datetime.timedelta(days=days_lookahead)
-    # Use list comprehension to filter future events
-    filtered_events = [event for event in all_events 
-                      if event.get('start_dt') and event.get('start_dt').replace(tzinfo=None) <= max_date]
-    all_events = filtered_events
-    return filtered_events
+    # Sort all events by start time
+    if all_events:
+        # Sort CalendarEvent objects by their start_dt property
+        all_events.sort(key=lambda e: e.start_dt or datetime.datetime.max)
+            
+    return all_events
 
 def get_calendar_name(service, calendar_id: str) -> str:
     """
-    Get the name of a calendar by its ID.
+    Get the name of a calendar from its ID.
     
     Args:
-        service: Authenticated Google Calendar API service instance.
-        calendar_id: ID of the calendar to look up.
+        service: Authenticated Google Calendar API service.
+        calendar_id: The ID of the calendar.
         
     Returns:
-        The name (summary) of the calendar, or the ID if not found.
+        The name of the calendar, or the ID if not found.
     """
-    logger.info(f"Looking up name for calendar ID: {calendar_id}")
-    if calendar_id == 'primary':
-        # For primary calendar, get the actual calendar details
-        try:
-            calendar = service.calendars().get(calendarId=calendar_id).execute()
-            name = calendar.get('summary', calendar_id)
-            logger.info(f"Primary calendar name: {name}")
-            return name
-        except Exception as e:
-            logger.error(f"Error getting primary calendar details: {e}")
-            return "Primary Calendar"
-    
     try:
-        calendar = service.calendarList().get(calendarId=calendar_id).execute()
-        name = calendar.get('summary', calendar_id)
-        logger.info(f"Calendar name for {calendar_id}: {name}")
-        return name
+        calendar = service.calendarList().get(calendar_id=calendar_id).execute()
+        return calendar.get('summary', calendar_id)
     except Exception as e:
-        logger.error(f"Error getting calendar name for {calendar_id}: {e}")
+        logger.error(f"Error getting calendar info for {calendar_id}: {e}")
         return calendar_id

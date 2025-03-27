@@ -1,85 +1,108 @@
+"""
+Scheduler module for planning interview practice sessions based on calendar events.
+"""
 from datetime import datetime, timedelta, timezone
+from typing import List, Tuple, Dict, Any, Optional
+
+# Other imports if needed
+try:
+    from models import CalendarEvent, TimeOfDay
+except ImportError:
+    # For backward compatibility
+    CalendarEvent = None
+    TimeOfDay = None
 
 def schedule_practice(events, duration_minutes=60, days_ahead=14):
     """
-    Simple heuristic-based scheduling for interview practice sessions.
-    Finds one free slot per day (up to 'days_ahead' days from now) for a session.
+    Schedule practice sessions based on available time slots.
     
-    :param events: List of Google Calendar events (each a dict with 'start' and 'end' times).
-    :param duration_minutes: Length of each practice session in minutes.
-    :param days_ahead: How many days ahead to look for free slots.
-    :return: List of (start_datetime, end_datetime) tuples for scheduled practice sessions.
+    Args:
+        events: List of events (can be dictionaries or CalendarEvent objects)
+        duration_minutes: Duration of practice sessions in minutes
+        days_ahead: Number of days ahead to schedule
+        
+    Returns:
+        List of (start_time, end_time) tuples for suggested practice sessions
     """
-    # Convert Google events into a list of (start_datetime, end_datetime)
-    busy_times = {}  # dict with date as key and list of (start, end) datetimes as value
+    # Constants
+    PRACTICE_DURATION = timedelta(minutes=duration_minutes)
+    START_HOUR = 9  # 9 AM
+    END_HOUR = 22   # 10 PM
+    
+    # Create a set of busy times from the events
+    busy_times = []
+    
     for event in events:
-        start_str = event['start'].get('dateTime', event['start'].get('date'))
-        end_str = event['end'].get('dateTime', event['end'].get('date'))
-        if not start_str or not end_str:
-            continue  # skip if no start or end (shouldn't happen in normal cases)
-        # Parse date/time strings into datetime objects
-        # Handle all-day events (date without time) and adjust end for all-day.
-        if len(start_str) == 10:  # format 'YYYY-MM-DD', an all-day event
-            # Treat all-day events as busy for the whole day
-            start_dt = datetime.fromisoformat(start_str)  # at midnight
-            end_dt = start_dt + timedelta(days=1)         # next midnight
-        else:
-            # Replace 'Z' with '+00:00' for UTC times, for datetime parsing
-            if start_str.endswith('Z'):
-                start_str = start_str.replace('Z', '+00:00')
-            if end_str.endswith('Z'):
-                end_str = end_str.replace('Z', '+00:00')
-            start_dt = datetime.fromisoformat(start_str)
-            end_dt = datetime.fromisoformat(end_str)
-        # Only consider events within the next 'days_ahead' days
-        # Ensure we're comparing timezone-aware datetimes by making now timezone-aware
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        if start_dt.tzinfo is not None:
-            # If start_dt has a timezone, make it timezone-naive for consistent comparison
-            start_dt = start_dt.replace(tzinfo=None)
-        if end_dt.tzinfo is not None:
-            # If end_dt has a timezone, make it timezone-naive for consistent comparison
-            end_dt = end_dt.replace(tzinfo=None)
+        # Handle both dictionary and Pydantic model formats
+        if isinstance(event, dict):
+            # Event is a dictionary from Google Calendar API
+            start_str = event.get('start', {}).get('dateTime')
+            end_str = event.get('end', {}).get('dateTime')
             
-        if start_dt.date() > now.date() + timedelta(days=days_ahead):
-            continue
-        day = start_dt.date()
-        busy_times.setdefault(day, []).append((start_dt, end_dt))
-    # Sort busy intervals for each day
-    for day in busy_times:
-        busy_times[day].sort(key=lambda x: x[0])
-    # Define workday hours for scheduling (could be adjusted or made configurable)
-    work_start = timedelta(hours=9)   # 9:00 AM
-    work_end   = timedelta(hours=17)  # 5:00 PM
-    session_dur = timedelta(minutes=duration_minutes)
-    suggestions = []
-    today = datetime.now().date()
-    for i in range(days_ahead + 1):  # include today + days_ahead
-        day = today + timedelta(days=i)
-        # Skip if it's a weekend (optional heuristic, can be removed if weekend practice is okay)
-        # if day.weekday() >= 5: 
-        #     continue
-        day_start = datetime.combine(day, datetime.min.time()) + work_start
-        day_end = datetime.combine(day, datetime.min.time()) + work_end
-        if day not in busy_times:
-            # No events this day, schedule at day_start
-            if day_start + session_dur <= day_end:
-                suggestions.append((day_start, day_start + session_dur))
+            if start_str and end_str:
+                # Convert to datetime objects
+                try:
+                    # Handle 'Z' timezone marker
+                    if 'Z' in start_str:
+                        start_str = start_str.replace('Z', '+00:00')
+                    if 'Z' in end_str:
+                        end_str = end_str.replace('Z', '+00:00')
+                        
+                    start_time = datetime.fromisoformat(start_str)
+                    end_time = datetime.fromisoformat(end_str)
+                    busy_times.append((start_time, end_time))
+                except Exception as e:
+                    print(f"Error parsing event times: {e}")
         else:
-            # There are events; find a gap before, between, or after events
-            current_time = day_start
-            for (ev_start, ev_end) in busy_times[day]:
-                # If there's free time between current_time and the next event start
-                if ev_start > current_time and (ev_start - current_time) >= session_dur:
-                    # Schedule a session starting at current_time
-                    suggestions.append((current_time, current_time + session_dur))
-                    break  # only one session per day
-                # Move the pointer past this event if it overlaps or touches current_time
-                if ev_end > current_time:
-                    current_time = ev_end
+            # Event is a CalendarEvent Pydantic model
+            start_dt = getattr(event, 'start_dt', None)
+            end_dt = getattr(event, 'end_dt', None)
+            
+            if start_dt and end_dt:
+                busy_times.append((start_dt, end_dt))
+    
+    # Sort busy times by start time
+    busy_times.sort()
+    
+    # Define the range to check for available slots
+    now = datetime.now()
+    end_date = now + timedelta(days=days_ahead)
+    
+    # Generate potential practice slots
+    available_slots = []
+    current_date = now.replace(hour=START_HOUR, minute=0, second=0, microsecond=0)
+    
+    # If we've already passed START_HOUR for today, start from tomorrow
+    if now.hour >= START_HOUR:
+        current_date += timedelta(days=1)
+    
+    while current_date < end_date:
+        day_end = current_date.replace(hour=END_HOUR, minute=0, second=0, microsecond=0)
+        slot_start = current_date
+        
+        # Check each potential slot against busy times
+        while slot_start + PRACTICE_DURATION <= day_end:
+            slot_end = slot_start + PRACTICE_DURATION
+            
+            # Check if slot overlaps with any busy time
+            is_available = True
+            for busy_start, busy_end in busy_times:
+                # Check for overlap
+                if (slot_start < busy_end and slot_end > busy_start):
+                    is_available = False
+                    # Move to the end of this busy period
+                    slot_start = busy_end
+                    break
+            
+            if is_available:
+                available_slots.append((slot_start, slot_end))
+                slot_start += PRACTICE_DURATION
             else:
-                # After checking all events, if there's space at end of day
-                if current_time + session_dur <= day_end:
-                    suggestions.append((current_time, current_time + session_dur))
-        # Stop if we've collected enough suggestions (one per day up to days_ahead)
-    return suggestions
+                # If not available, slot_start has already been updated
+                # to the end of the overlapping busy period
+                pass
+        
+        # Move to the next day
+        current_date = current_date + timedelta(days=1)
+    
+    return available_slots

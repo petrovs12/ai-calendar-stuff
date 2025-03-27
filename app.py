@@ -5,12 +5,14 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import pandas as pd
 import os
+from typing import List, Dict, Tuple, Any, Optional, Union, Callable, Set, cast
 
 # Local module imports
 import google_calendar
 import scheduler
 import database  # Import the database module
 import classification  # Import the classification module
+from models import CalendarEvent, Project  # Import the Pydantic models directly
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,14 +23,14 @@ with st.sidebar:
     st.header("DSPy Configuration")
     
     # Model selection
-    model_name = st.text_input(
+    model_name: str = st.text_input(
         "OpenAI Model Name",
         value=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         help="Enter the OpenAI model name (e.g., gpt-4o-mini)"
     )
     
     # API key input
-    api_key = st.text_input(
+    api_key: str = st.text_input(
         "OpenAI API Key",
         type="password",
         value=os.getenv("OPENAI_API_KEY", ""),
@@ -65,111 +67,7 @@ st.sidebar.info(f"MLflow UI: [Open MLflow Dashboard]({MLFLOW_URL})")
 
 # No need to check if MLflow server is running, since autolog will handle it gracefully
 
-def store_events_in_db(events, db_path="planner.db"): 
-    """Store calendar events in the SQLite database using the events table defined in database.py."""
-    logger.info(f"Storing {len(events)} events in database: {db_path}")
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-    
-    # Ensure the database is initialized with required tables
-    try:
-        database.init_db()  # Initialize the database if not already done
-        logger.info("Database tables verified/created through database.init_db()")
-    except Exception as e:
-        logger.error(f"Error initializing database: {e}")
-        # If init_db fails, try to create the events table directly
-        try:
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    project_id INTEGER,
-                    title TEXT NOT NULL,
-                    description TEXT,
-                    start_time TEXT NOT NULL,
-                    end_time TEXT NOT NULL,
-                    event_id TEXT UNIQUE,
-                    calendar_id TEXT,
-                    FOREIGN KEY(project_id) REFERENCES projects(id)
-                );
-            """)
-            logger.info("Events table created directly as fallback")
-        except Exception as inner_e:
-            logger.error(f"Error creating events table: {inner_e}")
-            raise
-    
-    # Insert events
-    events_added = 0
-    for event in events:
-        try:
-            event_id = event['id']
-            title = event.get('summary', 'No Title')
-            description = event.get('description', '')
-            calendar_id = event.get('calendarId', 'unknown')
-            
-            # Handle both datetime and date-only events
-            start = event['start'].get('dateTime', event['start'].get('date'))
-            end = event['end'].get('dateTime', event['end'].get('date'))
-            
-            # Insert into the events table using the schema from database.py
-            c.execute("""
-                INSERT OR REPLACE INTO events 
-                (title, description, start_time, end_time, event_id, calendar_id)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (title, description, start, end, event_id, calendar_id))
-            events_added += 1
-        except Exception as e:
-            logger.error(f"Error storing event {event.get('id', 'unknown')}: {e}")
-    
-    logger.info(f"Successfully stored {events_added} events in database")
-    conn.commit()
-    conn.close()
-
-def get_unclassified_events(limit=100):
-    """Retrieve events that haven't been classified (project_id is NULL)."""
-    conn = sqlite3.connect(database.DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT id, event_id, title, description, start_time, end_time, calendar_id 
-        FROM events 
-        WHERE project_id IS NULL
-        ORDER BY start_time 
-        LIMIT ?
-    """, (limit,))
-    events = cursor.fetchall()
-    conn.close()
-    for event in events:
-        print(event)
-    return events
-
-def get_classified_events(limit=1000):
-    """Retrieve events that have been classified with their project names."""
-    conn = sqlite3.connect(database.DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT e.id, e.event_id, e.title, e.description, e.start_time, e.end_time, 
-               e.calendar_id, e.project_id, p.name as project_name
-        FROM events e
-        JOIN projects p ON e.project_id = p.id
-        ORDER BY e.start_time 
-        LIMIT ?
-    """, (limit,))
-    events = cursor.fetchall()
-    conn.close()
-    return events
-
-def update_event_project(event_id, project_id):
-    """Update an event's project classification."""
-    conn = sqlite3.connect(database.DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE events
-        SET project_id = ?
-        WHERE id = ?
-    """, (project_id, event_id))
-    conn.commit()
-    conn.close()
-
-def auto_classify_events(limit=1000):
+def auto_classify_events(limit: int = 1000) -> List[Tuple[str, Optional[int], str, float]]:
     """Auto-classify unclassified events using the classification module."""
     try:
         # Check if DSPy is configured
@@ -181,8 +79,8 @@ def auto_classify_events(limit=1000):
         lm = st.session_state.dspy_lm
         
         # Get unclassified events
-        unclassified_events = get_unclassified_events(limit)
-        classified_events = get_classified_events(limit)
+        unclassified_events: List[CalendarEvent] = database.get_unclassified_events(limit, include_past=True)
+        classified_events: List[CalendarEvent] = database.get_classified_events(limit)
         
         if not unclassified_events:
             logger.info("No unclassified events to process")
@@ -191,29 +89,29 @@ def auto_classify_events(limit=1000):
         logger.info(f"Found {len(unclassified_events)} unclassified events")
         
         # Prepare events for batch classification
-        event_data_list = []
+        event_data_list: List[Dict[str, str]] = []
         for event in unclassified_events:
-            event_id, google_event_id, title, description, start_time, end_time, calendar_id = event
+            # Each event is now a CalendarEvent Pydantic model
             event_data_list.append({
-                'id': event_id,
-                'title': title,
-                'description': description,
-                'calendar_id': calendar_id
+                'id': event.id,  # This is the database ID
+                'title': event.summary,
+                'description': event.description or '',
+                'calendar_id': event.calendar_id or ''
             })
         
         # Use batch classification to get all results
-        batch_results = classification.batch_classify_events(
+        batch_results: Dict[str, Tuple[Optional[int], float]] = classification.batch_classify_events(
             event_data_list,
             lm=lm,
             run_name=f"app_classify_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
         
         # Process the classification results
-        results = []
+        results: List[Tuple[str, Optional[int], str, float]] = []
         for event_id, (project_id, confidence) in batch_results.items():
             # Get the event details for the result entry
-            event_data = next((e for e in event_data_list if e['id'] == event_id), None)
-            title = event_data['title'] if event_data else f"Event {event_id}"
+            event_data: Optional[Dict[str, str]] = next((e for e in event_data_list if e['id'] == event_id), None)
+            title: str = event_data['title'] if event_data else f"Event {event_id}"
             
             if project_id:
                 # Update the event with the classified project
@@ -226,41 +124,27 @@ def auto_classify_events(limit=1000):
         return results
     except Exception as e:
         logger.error(f"Auto-classification failed: {e}")
+        logger.exception(str(e))
         return []
-
-def get_calendar_name(calendar_id):
-    """Get the name of a calendar from its ID, with error handling."""
-    if not calendar_id:
-        return "Unknown Calendar"
-    
-    try:
-        if not st.session_state.service:
-            return calendar_id  # Just return the ID if no Google service
-        
-        name = google_calendar.get_calendar_name(st.session_state.service, calendar_id)
-        return name
-    except Exception as e:
-        logger.error(f"Error getting calendar name for {calendar_id}: {e}")
-        return calendar_id  # Fallback to using the ID itself
 
 # Initialize session state for calendar selection
 if 'selected_calendars' not in st.session_state:
     logger.info("Initializing selected_calendars in session state")
-    st.session_state.selected_calendars = []
+    st.session_state.selected_calendars: List[str] = []
 if 'available_calendars' not in st.session_state:
     logger.info("Initializing available_calendars in session state")
-    st.session_state.available_calendars = []
+    st.session_state.available_calendars: List[Dict[str, Any]] = []
 if 'service' not in st.session_state:
     logger.info("Initializing service in session state")
-    st.session_state.service = None
+    st.session_state.service: Any = None
 if 'active_tab' not in st.session_state:
-    st.session_state.active_tab = "Calendar"
+    st.session_state.active_tab: str = "Calendar"
 if 'new_project_name' not in st.session_state:
-    st.session_state.new_project_name = ""
+    st.session_state.new_project_name: str = ""
 if 'new_project_hours' not in st.session_state:
-    st.session_state.new_project_hours = 10
+    st.session_state.new_project_hours: int = 10
 if 'new_project_priority' not in st.session_state:
-    st.session_state.new_project_priority = 3
+    st.session_state.new_project_priority: int = 3
 
 # Load environment variables (if any)
 try:
@@ -274,8 +158,8 @@ logger.info("Setting up Streamlit UI")
 st.title("Interview Practice Scheduler")
 
 # Create tabs for different sections of the app
-tabs = ["Calendar", "Classification", "Projects", "Scheduling"]
-active_tab = st.sidebar.radio("Navigation", tabs, index=tabs.index(st.session_state.active_tab))
+tabs: List[str] = ["Calendar", "Classification", "Projects", "Scheduling"]
+active_tab: str = st.sidebar.radio("Navigation", tabs, index=tabs.index(st.session_state.active_tab))
 st.session_state.active_tab = active_tab
 
 if active_tab == "Calendar":
@@ -297,11 +181,11 @@ if active_tab == "Calendar":
                         
                         # Fetch available calendars
                         logger.info("Fetching available calendars")
-                        st.session_state.available_calendars = google_calendar.list_calendars(st.session_state.service)
+                        st.session_state.available_calendars: List[Dict[str, Any]] = google_calendar.list_calendars(st.session_state.service)
                         logger.info(f"Found {len(st.session_state.available_calendars)} calendars")
                         
                         # Pre-select primary calendar
-                        primary_calendars = [cal['id'] for cal in st.session_state.available_calendars if cal.get('primary', False)]
+                        primary_calendars: List[str] = [cal['id'] for cal in st.session_state.available_calendars if cal.get('primary', False)]
                         st.session_state.selected_calendars = primary_calendars
                         logger.info(f"Pre-selected primary calendar(s): {primary_calendars}")
                         
@@ -335,11 +219,11 @@ if active_tab == "Calendar":
             # Create checkboxes for each calendar
             for calendar in st.session_state.available_calendars:
                 # Determine if this calendar should be checked by default
-                is_selected = calendar['id'] in st.session_state.selected_calendars
-                calendar_label = f"{calendar['summary']} {' (Primary)' if calendar.get('primary', False) else ''}"
+                is_selected: bool = calendar['id'] in st.session_state.selected_calendars
+                calendar_label: str = f"{calendar['summary']} {' (Primary)' if calendar.get('primary', False) else ''}"
                 
                 # Create a checkbox for this calendar
-                checkbox_key = f"cal_{calendar['id']}"
+                checkbox_key: str = f"cal_{calendar['id']}"
                 if st.checkbox(calendar_label, value=is_selected, key=checkbox_key):
                     # Add to selected calendars if not already there
                     if calendar['id'] not in st.session_state.selected_calendars:
@@ -353,7 +237,7 @@ if active_tab == "Calendar":
             
             # Show which calendars are selected
             if st.session_state.selected_calendars:
-                selected_count = len(st.session_state.selected_calendars)
+                selected_count: int = len(st.session_state.selected_calendars)
                 logger.info(f"Total calendars selected: {selected_count}")
                 st.write(f"Selected {selected_count} calendar(s)")
             else:
@@ -370,9 +254,9 @@ if active_tab == "Calendar":
             with st.spinner("Fetching events and generating schedule..."):
                 try:
                     # Fetch events from selected calendars
-                    selected_cal_ids = st.session_state.selected_calendars
+                    selected_cal_ids: List[str] = st.session_state.selected_calendars
                     logger.info(f"Fetching events from {len(selected_cal_ids)} selected calendars")
-                    events = google_calendar.fetch_events(
+                    events: List[CalendarEvent] = google_calendar.fetch_events(
                         st.session_state.service, 
                         max_results=2000, 
                         calendar_ids=selected_cal_ids
@@ -381,11 +265,18 @@ if active_tab == "Calendar":
                     
                     # Store events in database
                     try:
-                        store_events_in_db(events)
-                        st.write("Calendar events have been stored in the database.")
-                        logger.info("Events successfully stored in database")
+                        # events are already dictionaries from Google Calendar API
+                        # No need to convert them ahead of time - the database.store_events 
+                        # function will handle conversion
+                        if events:
+                            stored_count = database.store_events(events)
+                            logger.info(f"Stored {stored_count} events in the database")
+                            st.success(f"Stored {stored_count} events in the database")
+                        else:
+                            logger.warning("No events retrieved from Google Calendar")
+                            st.warning("No events could be retrieved from Google Calendar")
                     except Exception as e:
-                        logger.error(f"Error storing events in database: {e}")
+                        logger.error(f"Error storing events: {e}")
                         st.error(f"Error storing events: {e}")
                     
                     if not events:
@@ -396,9 +287,9 @@ if active_tab == "Calendar":
                         st.subheader("Upcoming Events:")
                         
                         # Group events by calendar
-                        events_by_calendar = {}
+                        events_by_calendar: Dict[str, List[CalendarEvent]] = {}
                         for event in events:
-                            calendar_id = event.get('calendarId', 'unknown')
+                            calendar_id = event.get('calendar_id', '')
                             if calendar_id not in events_by_calendar:
                                 events_by_calendar[calendar_id] = []
                             events_by_calendar[calendar_id].append(event)
@@ -406,25 +297,26 @@ if active_tab == "Calendar":
                         # Display events for each calendar
                         logger.info(f"Displaying events from {len(events_by_calendar)} calendars")
                         for calendar_id, calendar_events in events_by_calendar.items():
-                            calendar_name = get_calendar_name(calendar_id)
-                            logger.info(f"Displaying {len(calendar_events)} events from calendar: {calendar_name}")
-                            with st.expander(f"{calendar_name} ({len(calendar_events)} events)", expanded=True):
+                            # Use calendar_id directly 
+                            logger.info(f"Displaying {len(calendar_events)} events from calendar: {calendar_id}")
+                            with st.expander(f"{calendar_id} ({len(calendar_events)} events)", expanded=True):
                                 for event in calendar_events:
-                                    # Extract event start time (dateTime or date for all-day events)
-                                    start = event['start'].get('dateTime', event['start'].get('date'))
-                                    summary = event.get('summary', 'No Title')
-                                    st.write(f"{start} - {summary}")
+                                    # Extract event start time
+                                    start_time: str = event.get('start', {}).get('dateTime', "No date")
+                                    summary: str = event.get('summary', "No title")
+                                    st.write(f"{start_time} - {summary}")
                         
-                        # Generate practice schedule suggestions based on fetched events
+                        # Fix the scheduler to use Pydantic models
                         st.subheader("Suggested Practice Sessions")
                         logger.info("Generating schedule suggestions")
                         try:
-                            suggestions = scheduler.schedule_practice(events, duration_minutes=60, days_ahead=14)
+                            # Use Pydantic models directly instead of converting to dictionaries
+                            suggestions: List[Tuple[datetime, datetime]] = scheduler.schedule_practice(events, duration_minutes=60, days_ahead=14)
                             logger.info(f"Generated {len(suggestions)} schedule suggestions")
                             
                             if suggestions:
                                 for start, end in suggestions:
-                                    formatted_time = f"{start.strftime('%a, %b %d, %Y %I:%M %p')} to {end.strftime('%I:%M %p')}"
+                                    formatted_time: str = f"{start.strftime('%a, %b %d, %Y %I:%M %p')} to {end.strftime('%I:%M %p')}"
                                     st.write(formatted_time)
                             else:
                                 logger.warning("No available free slots found")
@@ -434,6 +326,7 @@ if active_tab == "Calendar":
                             st.error(f"Error generating schedule: {e}")
                 except Exception as e:
                     logger.error(f"Error in schedule generation: {e}")
+                    logger.exception(str(e))
                     st.error(f"Error: {e}")
 
 elif active_tab == "Classification":
@@ -441,8 +334,8 @@ elif active_tab == "Classification":
     st.write("Classify your calendar events into projects for better organization and scheduling.")
     
     # Create sidebar menu for classification tab
-    classification_options = ["Manual Classification", "Auto-Classification", "Classified Events", "MLflow Testing"]
-    classification_selection = st.sidebar.radio(
+    classification_options: List[str] = ["Manual Classification", "Auto-Classification", "Classified Events", "MLflow Testing"]
+    classification_selection: str = st.sidebar.radio(
         "Classification Options", 
         classification_options, 
         index=0, 
@@ -457,15 +350,15 @@ elif active_tab == "Classification":
         st.stop()
     
     # Get projects for classification
-    projects = database.get_projects()
+    projects: List[Project] = database.get_projects()
     
     # New Project Creation Form
     with st.sidebar.expander("Create New Project", expanded=False):
         st.write("Add a new project for classifying events")
-        new_project_name = st.text_input("Project Name", key="new_project_name_input")
-        new_project_hours = st.number_input("Estimated Weekly Hours", min_value=1, max_value=168, value=10, key="new_project_hours_input")
-        new_project_priority = st.number_input("Priority (1=highest)", min_value=1, max_value=10, value=3, key="new_project_priority_input")
-        new_project_desc = st.text_area("Description", key="new_project_desc_input")
+        new_project_name: str = st.text_input("Project Name", key="new_project_name_input")
+        new_project_hours: int = st.number_input("Estimated Weekly Hours", min_value=1, max_value=168, value=10, key="new_project_hours_input")
+        new_project_priority: int = st.number_input("Priority (1=highest)", min_value=1, max_value=10, value=3, key="new_project_priority_input")
+        new_project_desc: str = st.text_area("Description", key="new_project_desc_input")
         
         if st.button("Create Project"):
             if new_project_name:
@@ -480,13 +373,13 @@ elif active_tab == "Classification":
                 st.warning("Project name is required")
     
     # Format projects for display
-    project_options = {p[0]: p[1] for p in projects}  # id: name
+    project_options: Dict[int, str] = {p.id: p.name for p in projects if p.id is not None}
     
     if classification_selection == "Manual Classification":
         st.subheader("Manual Event Classification")
         
         # Get unclassified events
-        unclassified_events = get_unclassified_events(25)
+        unclassified_events: List[CalendarEvent] = database.get_unclassified_events(25, include_past=True)
         
         if not unclassified_events:
             st.info("No unclassified events found. Fetch new events from the Calendar tab or all events have been classified.")
@@ -495,27 +388,23 @@ elif active_tab == "Classification":
             
             # Create a form for classifying events
             for event in unclassified_events:
-                event_id, google_event_id, title, description, start_time, end_time, calendar_id = event
-                
                 # Format the date for better readability
                 try:
-                    start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                    formatted_date = start_dt.strftime("%a, %b %d, %Y %I:%M %p")
+                    formatted_date: str = event.start_dt.strftime("%a, %b %d, %Y %I:%M %p") if event.start_dt else "No date"
                 except:
-                    formatted_date = start_time
+                    formatted_date: str = str(event.start.date_time) if event.start else "No date"
                 
                 # Create a container for each event for better styling
                 with st.container():
                     col1, col2 = st.columns([3, 1])
                     with col1:
-                        st.write(f"**{title}**")
+                        st.write(f"**{event.summary}**")
                         st.write(f"*{formatted_date}*")
-                        # Display the calendar ID to help identify which calendar the event is from
-                        calendar_name = get_calendar_name(calendar_id)
-                        st.write(f"📅 {calendar_name}")
-                        if description:
+                        # Display the calendar name
+                        st.write(f"📅 {event.calendar_id or 'Unknown Calendar'}")
+                        if event.description:
                             with st.expander("Description"):
-                                st.write(description)
+                                st.write(event.description)
                     
                     with col2:
                         # Dropdown for project selection
@@ -523,13 +412,34 @@ elif active_tab == "Classification":
                             "Project",
                             options=list(project_options.keys()),
                             format_func=lambda x: project_options[x],
-                            key=f"project_select_{event_id}"
+                            key=f"project_select_{event.id}"
                         )
                         
                         # Button to save classification
-                        if st.button("Classify", key=f"classify_btn_{event_id}"):
-                            update_event_project(event_id, selected_project)
-                            st.success(f"Event classified as '{project_options[selected_project]}'")
+                        if st.button("Classify", key=f"classify_btn_{event.id}"):
+                            # We need the database ID, not the Google event ID
+                            db_event = None
+                            db = None
+                            try:
+                                # Get the database event ID
+                                db = database.get_db_session()
+                                db_event = db.query(database.EventModel).filter(
+                                    database.EventModel.event_id == event.id
+                                ).first()
+                                
+                                if db_event:
+                                    success: bool = database.update_event_project(db_event.id, selected_project)
+                                    if success:
+                                        st.success(f"Event classified as '{project_options[selected_project]}'")
+                                    else:
+                                        st.error("Failed to update project.")
+                                else:
+                                    st.error(f"Could not find event with ID {event.id} in database")
+                            except Exception as e:
+                                st.error(f"Error classifying event: {e}")
+                            finally:
+                                if db:
+                                    db.close()
                     
                     st.divider()
     
@@ -547,42 +457,34 @@ elif active_tab == "Classification":
                 try:
                     with st.spinner("Classifying events..."):
                         # Get unclassified events
-                        limit = 100
-                        events_to_classify = get_unclassified_events(limit)
+                        limit: int = 100
+                        events_to_classify: List[CalendarEvent] = database.get_unclassified_events(limit, include_past=True)
                         
                         if not events_to_classify:
                             st.info("No unclassified events to process.")
                         else:
-                            results = auto_classify_events(limit)
+                            results: List[Tuple[str, Optional[int], str, float]] = auto_classify_events(limit)
                             st.success(f"Auto-classification completed! {len(results)} events processed.")
                             
                             # Display results
                             for event_id, project_id, title, confidence in results:
                                 project_name = project_options.get(project_id, "Unknown Project")
                                 
-                                # Get event details
-                                event_details = None
-                                for e in events_to_classify:
-                                    if e[0] == event_id:
-                                        event_details = e
-                                        break
+                                # Find the event in the list
+                                event: Optional[CalendarEvent] = next((e for e in events_to_classify if e.id == event_id), None)
                                 
-                                if event_details:
-                                    _, _, _, _, start_time, end_time, calendar_id = event_details
+                                if event:
                                     # Format the date
                                     try:
-                                        start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                                        formatted_date = start_dt.strftime("%a, %b %d, %Y %I:%M %p")
+                                        formatted_date: str = event.start_dt.strftime("%a, %b %d, %Y %I:%M %p") if event.start_dt else "No date"
                                     except:
-                                        formatted_date = start_time
+                                        formatted_date: str = str(event.start.date_time) if event.start else "No date"
                                     
-                                    # Get calendar name
-                                    calendar_name = get_calendar_name(calendar_id)
-                                    
+                                    # Get calendar name - use calendar_id directly
                                     with st.container():
                                         st.write(f"**{title}** → {project_name} (Confidence: {confidence:.0%})")
                                         st.write(f"*{formatted_date}*")
-                                        st.write(f"📅 {calendar_name}")
+                                        st.write(f"📅 {event.calendar_id or 'Unknown Calendar'}")
                                         st.divider()
                                 else:
                                     st.write(f"**{title}** → {project_name} (Confidence: {confidence:.0%})")
@@ -593,7 +495,7 @@ elif active_tab == "Classification":
     elif classification_selection == "Classified Events":
         st.subheader("Classified Events")
         
-        classified_events = get_classified_events(100)
+        classified_events: List[CalendarEvent] = database.get_classified_events(100)
         
         if not classified_events:
             st.info("No classified events found. Use Manual or Auto-Classification to classify some events first.")
@@ -601,32 +503,30 @@ elif active_tab == "Classification":
             st.write(f"Found {len(classified_events)} classified events.")
             
             # Group by project for better organization
-            by_project = {}
+            by_project: Dict[str, List[CalendarEvent]] = {}
             for event in classified_events:
-                event_id, google_event_id, title, description, start_time, end_time, calendar_id, project_id, project_name = event
+                project_name: str = event.project_name or "Unassigned"
                 if project_name not in by_project:
                     by_project[project_name] = []
-                by_project[project_name].append((event_id, title, description, start_time, end_time, calendar_id))
+                by_project[project_name].append(event)
             
             # Display events by project
             for project_name, events in by_project.items():
                 with st.expander(f"{project_name} ({len(events)} events)"):
-                    for event_id, title, description, start_time, end_time, calendar_id in events:
+                    for event in events:
                         try:
-                            start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                            formatted_date = start_dt.strftime("%a, %b %d, %Y %I:%M %p")
+                            formatted_date = event.start_dt.strftime("%a, %b %d, %Y %I:%M %p") if event.start_dt else "No date"
                         except:
-                            formatted_date = start_time
+                            formatted_date = str(event.start.date_time) if event.start else "No date"
                         
                         with st.container():
-                            st.write(f"**{title}**")
+                            st.write(f"**{event.summary}**")
                             st.write(f"*{formatted_date}*")
-                            # Display the calendar ID to help identify which calendar the event is from
-                            calendar_name = get_calendar_name(calendar_id)
-                            st.write(f"📅 {calendar_name}")
-                            if description:
+                            # Display the calendar name
+                            st.write(f"📅 {event.calendar_id or 'Unknown Calendar'}")
+                            if event.description:
                                 with st.expander("Description"):
-                                    st.write(description)
+                                    st.write(event.description)
                             st.divider()
     
     elif classification_selection == "MLflow Testing":
@@ -644,7 +544,7 @@ elif active_tab == "Classification":
                     if test_mlflow():
                         st.success("MLflow test successful! A test run has been created.")
                         # Create a link to view the test run
-                        mlflow_url = classification.MLFLOW_TRACKING_URI
+                        mlflow_url: str = classification.MLFLOW_TRACKING_URI
                         st.markdown(f"[View MLflow Dashboard]({mlflow_url})")
                     else:
                         st.error("MLflow test failed. Is the MLflow server running?")
@@ -660,8 +560,8 @@ elif active_tab == "Classification":
                     st.success("Test experiment created!")
                     
                     # Create a link to view the experiment
-                    experiment_id = classification.EXPERIMENT_NAME
-                    mlflow_url = classification.MLFLOW_TRACKING_URI
+                    experiment_id: str = classification.EXPERIMENT_NAME
+                    mlflow_url: str = classification.MLFLOW_TRACKING_URI
                     st.markdown(f"[View Experiment: {experiment_id}]({mlflow_url}/#/experiments/)")
 
 elif active_tab == "Projects":
@@ -676,25 +576,26 @@ elif active_tab == "Projects":
         st.stop()
     
     # Get projects
-    projects = database.get_projects()
+    projects: List[Project] = database.get_projects()
     
     # Create columns for project metrics
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Total Projects", len(projects))
+        project_count: int = len(projects)
+        st.metric("Total Projects", project_count)
     
     # New Project Creation Form
     with st.expander("Create New Project", expanded=False):
         st.write("Add a new project for classifying events")
-        new_project_name = st.text_input("Project Name")
-        new_project_hours = st.number_input("Estimated Weekly Hours", min_value=1, max_value=168, value=10)
-        new_project_priority = st.number_input("Priority (1=highest)", min_value=1, max_value=10, value=3)
-        new_project_desc = st.text_area("Description")
+        new_project_name: str = st.text_input("Project Name")
+        new_project_hours: int = st.number_input("Estimated Weekly Hours", min_value=1, max_value=168, value=10)
+        new_project_priority: int = st.number_input("Priority (1=highest)", min_value=1, max_value=10, value=3)
+        new_project_desc: str = st.text_area("Description")
         
         if st.button("Create Project"):
             if new_project_name:
                 try:
-                    project_id = database.add_project(new_project_name, new_project_hours, new_project_priority, new_project_desc)
+                    project_id: int = database.add_project(new_project_name, new_project_hours, new_project_priority, new_project_desc)
                     st.success(f"Project '{new_project_name}' created successfully!")
                     # Refresh projects list
                     projects = database.get_projects()
@@ -710,7 +611,7 @@ elif active_tab == "Projects":
         st.subheader("Your Projects")
         
         # Convert to DataFrame for better display
-        df = pd.DataFrame(projects, columns=['id', 'name', 'estimated_hours', 'priority', 'description'])
+        df: pd.DataFrame = pd.DataFrame(projects, columns=['id', 'name', 'estimated_hours', 'priority', 'description'])
         
         # Show projects in a table
         st.dataframe(

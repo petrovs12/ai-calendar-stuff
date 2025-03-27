@@ -18,6 +18,7 @@ import streamlit as st
 
 # Local imports
 import database
+from models import CalendarEvent
 
 # Directory for saving fine-tuned models
 MODEL_DIR = "models"
@@ -34,6 +35,9 @@ EXPERIMENT_NAME = "DSPy Calendar Event Classification"
 # Classification configuration
 CONFIDENCE_THRESHOLD = 70.0  # Only accept classifications with confidence > 70%
 
+# Global variables for model tracking
+MODEL_DEPLOYED = None
+
 # Define a DSPy Signature for event classification
 class EventClassification(dspy.Signature):
     """Classify a calendar event into one of the given project names or 'Unknown'."""
@@ -43,6 +47,91 @@ class EventClassification(dspy.Signature):
     project: str = dspy.OutputField(desc="Predicted project name (or 'unknown' if it doesn't match any project)")
     confidence: float = dspy.OutputField(desc="Confidence percentage (0-100) in this classification")
     explanation: str = dspy.OutputField(desc="Brief explanation of why this project was selected")
+
+# Define the DSPy module for classification
+class ProjectClassifier(dspy.Module):
+    """DSPy module for classifying events into projects."""
+    
+    def __init__(self):
+        super().__init__()
+        self.classifier = dspy.Predict("event_text -> project_name, confidence")
+    
+    def forward(self, event_text: str, project_names: List[str]):
+        # Format project names as a string
+        projects_str = ", ".join(project_names)
+        
+        # Create the full prompt with project names
+        prompt = f"""Classify the following calendar event into one of these projects: {projects_str}.
+        
+Calendar Event:
+{event_text}
+
+Choose the most appropriate project from the list. If none seem appropriate, answer "Unknown".
+Also provide a confidence score between 0 and 1, where 1 is completely confident.
+"""
+        
+        # Add the project names to the context
+        self.classifier.context = {"project_options": projects_str}
+        
+        # Classify the event
+        prediction = self.classifier(event_text=prompt)
+        
+        # Try to parse the confidence as a number
+        try:
+            confidence = float(prediction.confidence)
+            # Ensure confidence is in range 0-1
+            confidence = max(0.0, min(1.0, confidence))
+        except (ValueError, TypeError):
+            # If parsing fails, default to a medium confidence
+            confidence = 0.5
+            
+        return dspy.Prediction(
+            project_name=prediction.project_name.strip(),
+            confidence=confidence
+        )
+
+def initialize_experiment():
+    """Initialize MLflow experiment for tracking."""
+    # Set up MLflow tracking
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    
+    # Create or get the experiment
+    try:
+        experiment = mlflow.get_experiment_by_name(EXPERIMENT_NAME)
+        if experiment is None:
+            mlflow.create_experiment(EXPERIMENT_NAME)
+            logger.info(f"Created new experiment: {EXPERIMENT_NAME}")
+        else:
+            logger.info(f"Found existing experiment: {EXPERIMENT_NAME} (ID: {experiment.experiment_id})")
+    except Exception as e:
+        logger.warning(f"Failed to initialize MLflow experiment: {e}")
+
+def deploy_model(lm: Optional[Any] = None):
+    """Deploy the classification model with the given language model."""
+    global MODEL_DEPLOYED
+    
+    # If model is already deployed, return
+    if MODEL_DEPLOYED is not None:
+        return
+    
+    # If no LM is provided, create a new one
+    if lm is None:
+        try:
+            # Create OpenAI LM with the configured model
+            lm = dspy.OpenAI(model=MODEL_NAME, api_key=API_KEY)
+            logger.info(f"Created new OpenAI LM with model: {MODEL_NAME}")
+        except Exception as e:
+            logger.error(f"Failed to create OpenAI LM: {e}")
+            return
+    
+    try:
+        # Create and compile the classifier
+        classifier = ProjectClassifier()
+        MODEL_DEPLOYED = classifier
+        logger.info("Classification model deployed successfully")
+    except Exception as e:
+        logger.error(f"Failed to deploy classification model: {e}")
+        MODEL_DEPLOYED = None
 
 # Initialize MLflow
 def init_mlflow():
@@ -80,40 +169,41 @@ init_mlflow()
 api_key = os.getenv("OPENAI_API_KEY", "")
 model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-def configure_dspy(model_name: str = None, api_key: str = None):
+def configure_dspy(model_name: str = None, api_key: str = None) -> Optional[Any]:
     """
-    Configure DSPy with OpenAI model. This function creates an LM and stores it in session state.
+    Configure DSPy with the specified model and API key.
     
     Args:
-        model_name: Optional model name to use. If None, uses the default from env.
-        api_key: Optional API key to use. If None, uses the default from env.
+        model_name: The name of the OpenAI model to use
+        api_key: The OpenAI API key
         
     Returns:
-        The LM object
+        The configured language model or None if configuration failed
     """
-    # Use provided values or fall back to environment variables
-    current_model = model_name or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    current_api_key = api_key or os.getenv("OPENAI_API_KEY", "")
+    global MODEL_NAME, API_KEY
     
-    logger.info(f"Creating LM with model: {current_model}")
+    # Update global variables if provided
+    if model_name:
+        MODEL_NAME = model_name
+    if api_key:
+        API_KEY = api_key
     
-    if not current_api_key:
-        logger.warning("OpenAI API key not found. Classification will not work.")
+    # Validate essential settings
+    if not API_KEY:
+        logger.error("OpenAI API key is required")
         return None
     
     try:
-        # Create the LM
-        lm = dspy.LM(f'openai/{current_model}', api_key=current_api_key)
+        # Create the language model
+        lm = dspy.OpenAI(model=MODEL_NAME, api_key=API_KEY)
+        logger.info(f"DSPy configured with model: {MODEL_NAME}")
         
-        # Store in session state
-        st.session_state.dspy_lm = lm
-        st.session_state.dspy_configured = True
-        st.session_state.dspy_model_name = current_model
+        # Deploy the model
+        deploy_model(lm)
         
-        logger.info(f"Created LM with OpenAI model: {current_model}")
         return lm
     except Exception as e:
-        logger.error(f"Error creating LM: {e}")
+        logger.error(f"Error configuring DSPy: {e}")
         return None
 
 def get_classify_module(lm=None):
@@ -163,7 +253,7 @@ def load_latest_model():
         logger.error(f"Error loading model: {e}")
         return None
 
-def get_project_data() -> tuple[dict[str, int], list[str]]:
+def get_project_data() -> Tuple[Dict[str, int], List[str]]:
     """
     Get project data from the database.
     
@@ -172,238 +262,267 @@ def get_project_data() -> tuple[dict[str, int], list[str]]:
         - dict[str, int]: Mapping of project names (lowercase) to their IDs
         - list[str]: List of project names
     """
-    conn = database.sqlite3.connect(database.DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM projects")
-    project_data = cursor.fetchall()
-    conn.close()
-
-    if not project_data:
+    # Use the database module to get projects instead of direct sqlite3 access
+    projects = database.get_projects()
+    
+    if not projects:
         logger.warning("No projects found in database. Cannot classify event.")
         return {}, []
-
+    
     # Create a mapping of project names to IDs (case-insensitive)
     project_ids = {}
-    for pid, pname in project_data:
-        project_ids[pname.lower()] = pid
-
-    project_names = [name for _, name in project_data]
+    project_names = []
+    
+    for project in projects:
+        if project.id is not None and project.name:
+            project_ids[project.name.lower()] = project.id
+            project_names.append(project.name)
     
     return project_ids, project_names
 
-def classify_event(event_title: str, event_description: str = "", event_calendar: str = "", event_start_time: str = "", lm=None) -> Tuple[Optional[int], float]:
+def classify_event(
+    title: str, 
+    description: str,
+    project_names: List[str],
+    project_ids: Dict[str, int],
+    lm: Optional[Any] = None
+) -> Tuple[Optional[int], float]:
     """
-    Classify a calendar event into a project based on its title and description.
+    Classify an event into a project using DSPy.
     
     Args:
-        event_title: The title of the event
-        event_description: The description of the event (optional)
-        event_calendar: The calendar ID the event belongs to (optional)
-        event_start_time: The start time of the event in ISO format (optional)
-        lm: The language model to use (optional, defaults to session state LM)
+        title: Event title/summary
+        description: Event description 
+        project_names: List of project names
+        project_ids: Mapping of lowercase project names to IDs
+        lm: Optional language model to use
         
     Returns:
-        Tuple of (project_id, confidence) where project_id is None if classification failed
+        Tuple of (project_id, confidence)
     """
-    # Check if LM is available
-    if lm is None:
-        if 'dspy_lm' not in st.session_state:
-            logger.warning("No LM available. Please configure DSPy first.")
-            return None, 0.0
-        lm = st.session_state.dspy_lm
+    global MODEL_DEPLOYED
     
-    # Get a new classification module with the LM
-    classify_module = get_classify_module(lm)
-    if classify_module is None:
-        logger.error("Failed to create classification module.")
+    # Validate inputs
+    if not title and not description:
+        logger.warning("Both title and description are empty. Cannot classify.")
         return None, 0.0
-    
-    # Get project data from database
-    project_ids, project_names = get_project_data()
     
     if not project_names:
+        logger.warning("No projects available for classification")
         return None, 0.0
     
-    logger.info(f"Classifying event '{event_title}' against {len(project_names)} projects")
+    # Make sure we have a deployed model
+    deploy_model(lm)
     
-    # Prepare input for the classifier
-    input_text = f"{event_title}"
-    if event_description:
-        input_text += f" {event_description}"
+    # Initialize MLflow tracking if needed
+    initialize_experiment()
     
-    # Define projects_list for the classification
-    projects_list = ", ".join(project_names)
+    # Create a descriptive run name
+    run_name = f"classify_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    # Extract day of week and time of day from start time
-    day_of_week = "Unknown"
-    time_of_day = "Unknown"
-    iso_time = event_start_time
-    if event_start_time:
+    # Start a new MLflow run
+    with mlflow.start_run(run_name=run_name) as run:
+        # Log parameters
+        mlflow.log_param("title", title[:100] if title else "")
+        mlflow.log_param("description", description[:100] if description else "")
+        mlflow.log_param("model_name", MODEL_NAME)
+        
+        # Wrap API calls in try-except for robustness
         try:
-            start_dt = datetime.fromisoformat(event_start_time.replace('Z', '+00:00'))
-            day_of_week = start_dt.strftime("%A")
-            hour = start_dt.hour
-            if 5 <= hour < 12:
-                time_of_day = "morning"
-            elif 12 <= hour < 17:
-                time_of_day = "afternoon"
-            else:
-                time_of_day = "evening"
-        except Exception as e:
-            logger.warning(f"Could not parse event start time: {e}")
-    
-    try:
-        # Make the prediction
-        logger.info(f"Sending classification request to OpenAI with {len(project_names)} projects")
-        
-        # Log the exact input being sent to the model
-        logger.debug(f"Classification input: event='{input_text}', calendar='{event_calendar}', iso_time='{iso_time}', day='{day_of_week}', time='{time_of_day}', projects='{projects_list}'")
-        
-        # Make the prediction
-        result = classify_module(
-            event=input_text,
-            calendar=event_calendar,
-            iso_time=iso_time,
-            day_of_week=day_of_week,
-            time_of_day=time_of_day,
-            projects=projects_list
-        )
-        
-        # Log the raw result for debugging
-        logger.debug(f"Raw classification result: {result}")
-        
-        # Extract project name and confidence
-        predicted_project = result.project.strip() if hasattr(result, 'project') else "unknown"
-        
-        # Parse confidence with better error handling
-        confidence = 0.0
-        try:
-            if hasattr(result, 'confidence'):
-                confidence_str = str(result.confidence).strip()
-                # Remove any % signs
-                confidence_str = confidence_str.replace('%', '')
-                confidence = float(confidence_str)
+            # Combine title and description for the event text
+            event_text = f"Title: {title}\n"
+            if description:
+                event_text += f"Description: {description}\n"
                 
-                # If confidence is in 0-1 range, convert to 0-100
-                if 0 <= confidence <= 1:
-                    confidence *= 100
+            # Run inference with the classifier
+            result = MODEL_DEPLOYED(event_text=event_text, project_names=project_names)
             
-            # Ensure confidence is within 0-100 range
-            confidence = max(0, min(100, confidence))
-        except (ValueError, TypeError, AttributeError) as e:
-            logger.warning(f"Could not parse confidence score: {e}. Using 0.0")
-            confidence = 0.0
-        
-        logger.info(f"Model returned project '{predicted_project}' with confidence {confidence:.2f}")
-        
-        # Check if prediction is reliable
-        if predicted_project.lower() == "unknown" or confidence < CONFIDENCE_THRESHOLD:
-            logger.info(f"Classification uncertain: project='{predicted_project}', confidence={confidence:.2f}")
+            # Log the result
+            mlflow.log_param("predicted_project", result.project_name)
+            mlflow.log_metric("confidence", result.confidence)
+            
+            # Get the project ID from the predicted name
+            predicted = result.project_name.lower()
+            confidence = result.confidence
+            
+            # Find the closest matching project - first check for exact match
+            if predicted in project_ids:
+                project_id = project_ids[predicted]
+                logger.info(f"Classified event to project: {predicted} (ID: {project_id}, Confidence: {confidence:.0%})")
+                return project_id, confidence
+                
+            # If no exact match, try to find the closest name
+            # This is useful for handling minor differences in text
+            closest_name = find_closest_name(predicted, list(project_ids.keys()))
+            if closest_name:
+                project_id = project_ids[closest_name]
+                logger.info(f"Using closest match: '{closest_name}' for '{predicted}' (ID: {project_id})")
+                return project_id, confidence
+                
+            # No match found
+            logger.warning(f"No matching project found for '{predicted}'")
             return None, confidence
-        
-        # Find the project ID by name (case-insensitive)
-        project_id = None
-        for name, pid in project_ids.items():
-            if name == predicted_project.lower():
-                project_id = pid
-                break
-        
-        if project_id:
-            logger.info(f"Classified event as project ID {project_id} with confidence {confidence:.2f}")
-            return project_id, confidence
-        else:
-            logger.warning(f"Predicted project '{predicted_project}' not found in database")
-            return None, confidence
-    except Exception as e:
-        logger.error(f"Error during prediction: {e}")
-        logger.exception(str(e))
-        return None, 0.0
+            
+        except Exception as e:
+            # Log the error
+            logger.error(f"Classification error: {e}")
+            mlflow.log_param("error", str(e)[:200])
+            return None, 0.0
 
-def batch_classify_events(event_list, lm=None, run_name=None) -> Dict[Any, Tuple[Optional[int], float]]:
+def batch_classify_events(event_data: List[Dict[str, str]], lm: Optional[Any] = None, run_name: Optional[str] = None) -> Dict[str, Tuple[Optional[int], float]]:
     """
-    Classify a batch of events
+    Batch classify events using MLflow for tracking.
     
     Args:
-        event_list: List of event dictionaries with title, description (optional), and calendar_id (optional)
-        lm: The language model to use (optional, defaults to session state LM)
-        run_name: Optional custom name for the parent run (unused, kept for API compatibility)
+        event_data: List of event dictionaries with 'id', 'title', and 'description'
+        lm: Optional language model to use
+        run_name: Name for the MLflow run
         
     Returns:
-        Dictionary of results with event IDs as keys and (project_id, confidence) as values
+        Dictionary mapping event IDs to (project_id, confidence) tuples
     """
-    # Check if LM is available
-    if lm is None:
-        if 'dspy_lm' not in st.session_state:
-            logger.warning("No LM available. Please configure DSPy first.")
-            return {}
-        lm = st.session_state.dspy_lm
+    global MODEL_DEPLOYED
     
-    results = {}
+    logger.info(f"Batch classifying {len(event_data)} events")
     
-    # Classify each event
-    logger.info(f"Batch classifying {len(event_list)} events")
-    for i, event in enumerate(event_list):
-        # Limit batch size for testing - remove this in production
-        if i > 3:  # Process just a few events to avoid hitting rate limits
-            logger.info(f"Stopping batch after {i} events")
-            break
+    # Initialize MLflow experiment and tracking
+    initialize_experiment()
+    
+    # Start a new MLflow run
+    run_name = run_name or f"batch_classify_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    with mlflow.start_run(run_name=run_name) as run:
+        # Log run info
+        mlflow.log_param("event_count", len(event_data))
+        mlflow.log_param("model_name", MODEL_NAME)
+        
+        # Initialize results
+        results: Dict[str, Tuple[Optional[int], float]] = {}
+        
+        # Get project data
+        project_ids, project_names = get_project_data()
+        
+        # Check if we have projects to classify events
+        if not project_names:
+            logger.warning("No projects available for classification")
+            mlflow.log_param("status", "failed_no_projects")
+            return results
+        
+        # Process each event in the batch
+        for idx, event in enumerate(event_data):
+            event_id = event.get('id')
+            title = event.get('title', '')
+            description = event.get('description', '')
             
-        title = event.get('title', '')
-        description = event.get('description', '')
-        calendar_id = event.get('calendar_id', '')
-        event_id = event.get('id', i)
+            # Log event info for tracking
+            mlflow.log_param(f"event_{idx}_id", event_id)
+            mlflow.log_param(f"event_{idx}_title", title[:50] if title else "")
+            
+            try:
+                # Call classify_event with the event data
+                project_id, confidence = classify_event(
+                    title, 
+                    description, 
+                    project_names,
+                    project_ids,
+                    lm=lm
+                )
+                
+                # Update the database with the classification result
+                if project_id is not None:
+                    update_event_with_classification(event_id, project_id, confidence)
+                
+                # Store the result
+                results[event_id] = (project_id, confidence)
+                
+                # Log the result
+                mlflow.log_metric(f"event_{idx}_confidence", confidence)
+                mlflow.log_param(f"event_{idx}_project_id", project_id if project_id else "none")
+                
+            except Exception as e:
+                logger.error(f"Error classifying event {event_id}: {e}")
+                mlflow.log_param(f"event_{idx}_error", str(e)[:100])
+                results[event_id] = (None, 0.0)
         
-        # Classify the event using the same LM
-        project_id, confidence = classify_event(
-            title, 
-            description, 
-            calendar_id, 
-            lm=lm
-        )
+        # Log overall results
+        classified_count = sum(1 for pid, _ in results.values() if pid is not None)
+        mlflow.log_metric("classified_count", classified_count)
+        mlflow.log_metric("classification_rate", classified_count / len(event_data) if event_data else 0)
         
-        # Store the result
-        results[event_id] = (project_id, confidence)
-    
-    # Log summary
-    classified_count = sum(1 for _, (pid, _) in results.items() if pid is not None)
-    logger.info(f"Batch classification complete. {classified_count}/{len(results)} events classified.")
-    
-    return results
+        logger.info(f"Batch classification complete: {classified_count}/{len(event_data)} events classified")
+        return results
 
-def update_event_with_classification(event_id: int, project_id: int) -> bool:
+def update_event_with_classification(event_id: str, project_id: int, confidence: Optional[float] = None) -> bool:
     """
-    Update an event in the database with its classification result.
+    Update an event with its classification result.
     
     Args:
-        event_id: The ID of the event to update
-        project_id: The ID of the project to assign
+        event_id: The event ID to update
+        project_id: The project ID to assign to the event
+        confidence: Optional confidence score for the classification
         
     Returns:
-        Boolean indicating success
+        bool: True if the update was successful, False otherwise
     """
     try:
-        conn = sqlite3.connect(database.DB_PATH)
-        cursor = conn.cursor()
+        # Get the event from the database to get its internal ID
+        session = database.get_db_session()
+        event = session.query(database.EventModel).filter(
+            database.EventModel.event_id == event_id
+        ).first()
+        session.close()
         
-        # Update the event with the project ID
-        cursor.execute("""
-            UPDATE events
-            SET project_id = ?
-            WHERE id = ?
-        """, (project_id, event_id))
-        
-        conn.commit()
-        conn.close()
-        
-        logger.info(f"Updated event {event_id} with project ID {project_id}")
-        return True
+        if event:
+            # Use the database function to update the event
+            return database.update_event_project(event.id, project_id)
+        else:
+            logger.warning(f"Event with ID {event_id} not found in database")
+            return False
     except Exception as e:
-        logger.error(f"Error updating event with classification: {e}")
+        logger.error(f"Error updating event classification: {e}")
         return False
 
 def init_db():
     """Initialize the database."""
     database.init_db()
+
+def find_closest_name(target: str, options: List[str], threshold: float = 0.8) -> Optional[str]:
+    """
+    Find the closest matching string from a list of options using fuzzy matching.
+    
+    Args:
+        target: The target string to match
+        options: List of strings to compare against
+        threshold: Similarity threshold (0-1) for considering a match
+        
+    Returns:
+        The closest matching string, or None if no good match found
+    """
+    try:
+        # Simple case - direct substring match
+        for option in options:
+            if target in option or option in target:
+                return option
+                
+        # Try fuzzy matching with difflib
+        from difflib import SequenceMatcher
+        
+        best_match = None
+        best_ratio = 0
+        
+        for option in options:
+            ratio = SequenceMatcher(None, target.lower(), option.lower()).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_match = option
+                
+        # Return the best match if it's above the threshold
+        if best_ratio >= threshold:
+            return best_match
+            
+        return None
+    except Exception as e:
+        logger.error(f"Error in find_closest_name: {e}")
+        return None
 
 # Add a test invocation at the end to run when the script is executed directly
 if __name__ == "__main__":
