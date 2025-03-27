@@ -80,7 +80,6 @@ def auto_classify_events(limit: int = 1000) -> List[Tuple[str, Optional[int], st
         
         # Get unclassified events
         unclassified_events: List[CalendarEvent] = database.get_unclassified_events(limit, include_past=True)
-        classified_events: List[CalendarEvent] = database.get_classified_events(limit)
         
         if not unclassified_events:
             logger.info("No unclassified events to process")
@@ -88,20 +87,9 @@ def auto_classify_events(limit: int = 1000) -> List[Tuple[str, Optional[int], st
         
         logger.info(f"Found {len(unclassified_events)} unclassified events")
         
-        # Prepare events for batch classification
-        event_data_list: List[Dict[str, str]] = []
-        for event in unclassified_events:
-            # Each event is now a CalendarEvent Pydantic model
-            event_data_list.append({
-                'id': event.id,  # This is the event_id, not database ID
-                'title': event.summary,
-                'description': event.description or '',
-                'calendar_id': event.calendar_id or ''
-            })
-        
-        # Use batch classification to get all results
+        # Use batch classification to get all results - pass CalendarEvent objects directly
         batch_results: Dict[str, Tuple[Optional[int], float]] = classification.batch_classify_events(
-            event_data_list,
+            unclassified_events,
             lm=lm,
             run_name=f"app_classify_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
@@ -109,9 +97,9 @@ def auto_classify_events(limit: int = 1000) -> List[Tuple[str, Optional[int], st
         # Process the classification results
         results: List[Tuple[str, Optional[int], str, float]] = []
         for event_id, (project_id, confidence) in batch_results.items():
-            # Get the event details for the result entry
-            event_data: Optional[Dict[str, str]] = next((e for e in event_data_list if e['id'] == event_id), None)
-            title: str = event_data['title'] if event_data else f"Event {event_id}"
+            # Find the original event in our list
+            event = next((e for e in unclassified_events if e.id == event_id), None)
+            title = event.summary if event else f"Event {event_id}"
             
             if project_id:
                 # Update the event with the classified project

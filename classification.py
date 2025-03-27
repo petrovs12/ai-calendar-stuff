@@ -7,7 +7,7 @@ import os
 import logging
 from typing import List, Optional, Tuple, Dict, Any
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import dspy
 import mlflow
@@ -16,7 +16,7 @@ import streamlit as st
 
 # Local imports
 import database
-from models import CalendarEvent
+from models import CalendarEvent, TimeOfDay, CalendarEventTime
 
 # Directory for saving fine-tuned models
 MODEL_DIR = "models"
@@ -33,11 +33,15 @@ EXPERIMENT_NAME = "DSPy Calendar Event Classification"
 # Classification configuration
 CONFIDENCE_THRESHOLD = 70.0  # Only accept classifications with confidence > 70%
 
-# Define a DSPy Signature for event classification
+# Define a DSPy Signature for enhanced event classification
 class EventClassification(dspy.Signature):
     """Classify a calendar event into one of the given project names or 'Unknown'."""
-    event: str = dspy.InputField(desc="The event title and description text")
-    calendar: str = dspy.InputField(desc="The calendar ID of the event")
+    title: str = dspy.InputField(desc="The event title")
+    description: str = dspy.InputField(desc="The event description")
+    calendar_id: str = dspy.InputField(desc="The calendar ID of the event")
+    day_of_week: str = dspy.InputField(desc="Day of the week (Monday, Tuesday, etc.)")
+    time_of_day: str = dspy.InputField(desc="Time of day (Morning, Afternoon, Evening, Night)")
+    attendees: str = dspy.InputField(desc="Comma-separated list of attendees' email addresses")
     projects: str = dspy.InputField(desc="Comma-separated list of existing project names")
     project: str = dspy.OutputField(desc="Predicted project name (or 'unknown' if it doesn't match any project)")
     confidence: float = dspy.OutputField(desc="Confidence percentage (0-100) in this classification")
@@ -251,18 +255,16 @@ def get_project_data() -> Tuple[Dict[str, int], List[str]]:
     return project_ids, project_names
 
 def classify_event(
-    title: str, 
-    description: str,
+    event: CalendarEvent,
     project_names: List[str],
     project_ids: Dict[str, int],
     lm: Optional[Any] = None
 ) -> Tuple[Optional[int], float]:
     """
-    Classify an event into a project using DSPy.
+    Classify a CalendarEvent into a project using DSPy.
     
     Args:
-        title: Event title/summary
-        description: Event description 
+        event: CalendarEvent object to classify
         project_names: List of project names
         project_ids: Mapping of lowercase project names to IDs
         lm: Optional language model to use
@@ -271,7 +273,7 @@ def classify_event(
         Tuple of (project_id, confidence)
     """
     # Validate inputs
-    if not title and not description:
+    if not event.summary and not event.description:
         logger.warning("Both title and description are empty. Cannot classify.")
         return None, 0.0
     
@@ -288,40 +290,40 @@ def classify_event(
     # Initialize MLflow tracking if needed
     initialize_experiment()
     
-    # Create a descriptive run name
-    # run_name = f"classify_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
-    # Start a new MLflow run
-    # with mlflow.start_run(run_name=run_name,nested=True) as run:
-        # Log parameters
     # Wrap API calls in try-except for robustness
     try:
-        # Combine title and description for the event text
-        event_text = f"Title: {title}\n"
-        if description:
-            event_text += f"Description: {description}\n"
-                
-            # Run inference with the classifier
+        # Extract day of week if available
+        day_of_week = ""
+        if event.start_dt:
+            day_of_week = event.start_dt.strftime("%A")
+        
+        # Get time of day
+        time_of_day = event.time_of_day.name if event.time_of_day else "UNKNOWN"
+        
+        # Get attendees if available
+        attendees = ", ".join(event.attendee_emails) if hasattr(event, 'attendee_emails') else ""
+        
+        # Run inference with the classifier
         result = classifier(
-                event=event_text,
-                calendar="",
-                projects=", ".join(project_names)
+            title=event.summary,
+            description=event.description or "",
+            calendar_id=event.calendar_id or "",
+            day_of_week=day_of_week,
+            time_of_day=time_of_day,
+            attendees=attendees,
+            projects=", ".join(project_names)
         )
-            
-        # Log the result
-        # mlflow.log_param("predicted_project", result.project)
-        # mlflow.log_metric("confidence", result.confidence)
-            
+        
         # Get the project ID from the predicted name
         predicted = result.project.lower()
         confidence = result.confidence / 100.0  # Convert from percentage to 0-1 scale
-            
+        
         # Find the closest matching project - first check for exact match
         if predicted in project_ids:
             project_id = project_ids[predicted]
             logger.info(f"Classified event to project: {predicted} (ID: {project_id}, Confidence: {confidence:.0%})")
             return project_id, confidence
-                
+            
         # If no exact match, try to find the closest name
         # This is useful for handling minor differences in text
         closest_name = find_closest_name(predicted, list(project_ids.keys()))
@@ -329,30 +331,29 @@ def classify_event(
             project_id = project_ids[closest_name]
             logger.info(f"Using closest match: '{closest_name}' for '{predicted}' (ID: {project_id})")
             return project_id, confidence
-                
-            # No match found
-            logger.warning(f"No matching project found for '{predicted}'")
-            return None, confidence
             
+        # No match found
+        logger.warning(f"No matching project found for '{predicted}'")
+        return None, confidence
+        
     except Exception as e:
         # Log the error
-        # logger.error(f"Classification error: {e}")
-        # mlflow.log_param("error", str(e)[:200])
+        logger.error(f"Classification error: {e}")
         return None, 0.0
 
-def batch_classify_events(event_data: List[Dict[str, str]], lm: Optional[Any] = None, run_name: Optional[str] = None) -> Dict[str, Tuple[Optional[int], float]]:
+def batch_classify_events(events: List[CalendarEvent], lm: Optional[Any] = None, run_name: Optional[str] = None) -> Dict[str, Tuple[Optional[int], float]]:
     """
     Batch classify events using MLflow for tracking.
     
     Args:
-        event_data: List of event dictionaries with 'id', 'title', and 'description'
+        events: List of CalendarEvent objects to classify
         lm: Optional language model to use
         run_name: Name for the MLflow run
         
     Returns:
         Dictionary mapping event IDs to (project_id, confidence) tuples
     """
-    logger.info(f"Batch classifying {len(event_data)} events")
+    logger.info(f"Batch classifying {len(events)} events")
     
     # Initialize MLflow experiment and tracking
     initialize_experiment()
@@ -362,43 +363,39 @@ def batch_classify_events(event_data: List[Dict[str, str]], lm: Optional[Any] = 
     
     # Get project data
     project_ids, project_names = get_project_data()
-        
+    
     # Check if we have projects to classify events
     if not project_names:
         logger.warning("No projects available for classification")
-        mlflow.log_param("status", "failed_no_projects")
         return results
-        
+    
     # Process each event in the batch
-    for idx, event in enumerate(event_data):
-        event_id = event.get('id')
-        title = event.get('title', '')
-        description = event.get('description', '')
-            
+    for idx, event in enumerate(events):
+        event_id = event.id
+        
         try:
             # Call classify_event with the event data
             project_id, confidence = classify_event(
-                title, 
-                description, 
+                event,
                 project_names,
                 project_ids,
                 lm=lm
             )
-                
+            
             # Update the database with the classification result
             if project_id is not None:
                 update_event_with_classification(event_id, project_id, confidence)
-                
-                # Store the result
-                results[event_id] = (project_id, confidence)
-                
+            
+            # Store the result
+            results[event_id] = (project_id, confidence)
+            
         except Exception as e:
             logger.error(f"Error classifying event {event_id}: {e}")
             results[event_id] = (None, 0.0)
     
     # Log overall results
     classified_count = sum(1 for pid, _ in results.values() if pid is not None)
-    logger.info(f"Batch classification complete: {classified_count}/{len(event_data)} events classified")
+    logger.info(f"Batch classification complete: {classified_count}/{len(events)} events classified")
     return results
 
 def update_event_with_classification(event_id: str, project_id: int, confidence: Optional[float] = None) -> bool:
@@ -477,8 +474,20 @@ if __name__ == "__main__":
     database.init_db()
     
     # Test the classification with a sample event
-    test_event = "Weekly team meeting with engineering"
-    print(f"Classifying test event: '{test_event}'")
+    test_event_title = "Weekly team meeting with engineering"
+    print(f"Creating test event with title: '{test_event_title}'")
+    
+    # Create a test CalendarEvent object
+    from models import CalendarEventTime
+    now = datetime.now()
+    test_event = CalendarEvent(
+        id="test_event_123",
+        summary=test_event_title,
+        description="Weekly sync-up with the engineering team to discuss progress",
+        start=CalendarEventTime(dateTime=now.isoformat(), dt=now),
+        end=CalendarEventTime(dateTime=(now + timedelta(hours=1)).isoformat(), dt=now + timedelta(hours=1)),
+        calendar_id="primary"
+    )
     
     # Need to configure DSPy before calling classify_event
     lm = configure_dspy()
@@ -487,8 +496,7 @@ if __name__ == "__main__":
         project_ids, project_names = get_project_data()
         
         project_id, confidence = classify_event(
-            test_event, 
-            "",  # No description
+            test_event,
             project_names,
             project_ids,
             lm=lm
