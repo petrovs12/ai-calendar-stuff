@@ -235,64 +235,6 @@ class CalendarEvent(BaseModel):
             
         return data
     
-    def to_db_dict(self) -> Dict[str, Any]:
-        """
-        Convert to a dictionary suitable for database storage.
-        
-        Returns:
-            Dict with fields matching the database schema
-        """
-        return {
-            "event_id": self.id,
-            "title": self.summary,
-            "description": self.description or "",
-            "start_time": self.start_dt.isoformat() if self.start_dt else "",
-            "end_time": self.end_dt.isoformat() if self.end_dt else "",
-            "calendar_id": self.calendar_id or "",
-            "project_id": self.project_id,
-            "raw_event_data": json.dumps(self.model_dump(), cls=DateTimeEncoder)
-        }
-    
-    @classmethod
-    def from_db_dict(cls, db_dict: Dict[str, Any]) -> "CalendarEvent":
-        """
-        Create a CalendarEvent from database dictionary.
-        
-        Args:
-            db_dict: Dictionary from database query
-            
-        Returns:
-            CalendarEvent instance
-        """
-        # If we have raw_event_data, use that as primary source
-        if "raw_event_data" in db_dict and db_dict["raw_event_data"]:
-            try:
-                # Parse the stored JSON
-                event_data = json.loads(db_dict["raw_event_data"])
-                
-                # Add fields that might be in the DB but not in the raw data
-                if "project_id" in db_dict and db_dict["project_id"]:
-                    event_data["project_id"] = db_dict["project_id"]
-                if "project_name" in db_dict and db_dict["project_name"]:
-                    event_data["project_name"] = db_dict["project_name"]
-                
-                return cls.model_validate(event_data)
-            except Exception as e:
-                # If parsing fails, continue with the regular approach
-                pass
-        
-        # Create a minimal event from the database fields
-        return cls(
-            id=db_dict.get("event_id", ""),
-            summary=db_dict.get("title", ""),
-            description=db_dict.get("description", ""),
-            start=CalendarEventTime(dateTime=db_dict.get("start_time", "")),
-            end=CalendarEventTime(dateTime=db_dict.get("end_time", "")),
-            calendar_id=db_dict.get("calendar_id", ""),
-            project_id=db_dict.get("project_id"),
-            project_name=db_dict.get("project_name")
-        )
-    
     @classmethod
     def from_google_dict(cls, event_dict: Dict[str, Any], calendar_id: Optional[str] = None) -> 'CalendarEvent':
         """Create a CalendarEvent from a Google Calendar API event dictionary.
@@ -309,7 +251,7 @@ class CalendarEvent(BaseModel):
         end = CalendarEventTime.from_google_dict(event_dict.get('end', {}))
         
         # Use provided calendar_id or the one in event_dict
-        cal_id = calendar_id or event_dict.get('calendar_id')
+        cal_id = calendar_id or event_dict.get('calendar_id') or event_dict.get('calendarId')
         
         # Create the event with required fields
         return cls(

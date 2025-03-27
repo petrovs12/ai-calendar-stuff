@@ -1,6 +1,5 @@
 from collections import defaultdict
 import streamlit as st
-import sqlite3
 import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -94,7 +93,7 @@ def auto_classify_events(limit: int = 1000) -> List[Tuple[str, Optional[int], st
         for event in unclassified_events:
             # Each event is now a CalendarEvent Pydantic model
             event_data_list.append({
-                'id': event.id,  # This is the database ID
+                'id': event.id,  # This is the event_id, not database ID
                 'title': event.summary,
                 'description': event.description or '',
                 'calendar_id': event.calendar_id or ''
@@ -418,14 +417,13 @@ elif active_tab == "Classification":
                         # Button to save classification
                         if st.button("Classify", key=f"classify_btn_{event.id}"):
                             # We need the database ID, not the Google event ID
-                            db_event = None
-                            db = None
                             try:
                                 # Get the database event ID
                                 db = database.get_db_session()
                                 db_event = db.query(database.EventModel).filter(
                                     database.EventModel.event_id == event.id
                                 ).first()
+                                db.close()
                                 
                                 if db_event:
                                     success: bool = database.update_event_project(db_event.id, selected_project)
@@ -437,9 +435,6 @@ elif active_tab == "Classification":
                                     st.error(f"Could not find event with ID {event.id} in database")
                             except Exception as e:
                                 st.error(f"Error classifying event: {e}")
-                            finally:
-                                if db:
-                                    db.close()
                     
                     st.divider()
     
@@ -611,7 +606,8 @@ elif active_tab == "Projects":
         st.subheader("Your Projects")
         
         # Convert to DataFrame for better display
-        df: pd.DataFrame = pd.DataFrame(projects, columns=['id', 'name', 'estimated_hours', 'priority', 'description'])
+        project_dicts = [p.model_dump() for p in projects]
+        df: pd.DataFrame = pd.DataFrame(project_dicts)
         
         # Show projects in a table
         st.dataframe(

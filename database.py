@@ -7,23 +7,12 @@ import logging
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 
-from sqlalchemy import create_engine, Column, Integer, String, Text, JSON, ForeignKey, Boolean, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey, Boolean, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
 
 # Import our Pydantic models
-try:
-    from models import CalendarEvent, Project, DateTimeEncoder, CalendarEventTime
-except ImportError:
-    # For backward compatibility if models.py is not yet available
-    CalendarEvent = dict
-    Project = dict
-    
-    class DateTimeEncoder(json.JSONEncoder):
-        def default(self, obj):
-            if isinstance(obj, datetime):
-                return obj.isoformat()
-            return super().default(obj)
+from models import CalendarEvent, Project, DateTimeEncoder, CalendarEventTime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -57,19 +46,7 @@ class ProjectModel(Base):
     
     def to_pydantic(self) -> Project:
         """Convert to Pydantic model."""
-        if isinstance(Project, type) and hasattr(Project, "model_validate"):
-            # Additional data that might need to be manually inserted
-            additional_data = {}
-            return Project.model_validate(self, from_attributes=True)
-        else:
-            # Fallback for backward compatibility
-            return {
-                "id": self.id,
-                "name": self.name,
-                "estimated_hours": self.estimated_hours,
-                "priority": self.priority, 
-                "description": self.description
-            }
+        return Project.model_validate(self, from_attributes=True)
 
 
 class EventModel(Base):
@@ -146,129 +123,11 @@ class TrackingModel(Base):
     confirmation_time = Column(String, nullable=True)
 
 
-def migrate_schema() -> None:
-    """
-    Migrate the database schema to the latest version.
-    This will handle any column renames or new columns needed.
-    """
-    import sqlite3
-    
-    logger.info("Starting database schema migration...")
-    
-    try:
-        # Connect directly with sqlite3 to perform migrations
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        # Check if we need to rename the title column to summary
-        cursor.execute("PRAGMA table_info(events)")
-        columns = cursor.fetchall()
-        column_names = [col[1] for col in columns]
-        
-        # If title exists but summary doesn't, we need to rename
-        if "title" in column_names and "summary" not in column_names:
-            logger.info("Migrating: Renaming 'title' column to 'summary'")
-            # Create a new table with the correct schema
-            cursor.execute("""
-                CREATE TABLE events_new (
-                    id INTEGER PRIMARY KEY,
-                    event_id TEXT UNIQUE NOT NULL,
-                    summary TEXT,
-                    description TEXT,
-                    location TEXT,
-                    calendar_id TEXT,
-                    start_time TIMESTAMP,
-                    end_time TIMESTAMP,
-                    project_id INTEGER,
-                    FOREIGN KEY (project_id) REFERENCES projects(id)
-                )
-            """)
-            
-            # Copy data from old table to new, mapping title to summary
-            cursor.execute("""
-                INSERT INTO events_new (id, event_id, summary, description, location, calendar_id, start_time, end_time, project_id)
-                SELECT id, event_id, title, description, location, calendar_id, start_time, end_time, project_id
-                FROM events
-            """)
-            
-            # Drop old table and rename new one
-            cursor.execute("DROP TABLE events")
-            cursor.execute("ALTER TABLE events_new RENAME TO events")
-            logger.info("Renamed 'title' column to 'summary'")
-        
-        # Check if location column exists, add if not
-        if "location" not in column_names:
-            logger.info("Adding 'location' column to events table")
-            cursor.execute("ALTER TABLE events ADD COLUMN location TEXT")
-        
-        # Convert start_time and end_time to proper datetime columns if they're strings
-        try:
-            # Check if start_time is TEXT type
-            cursor.execute("SELECT typeof(start_time) FROM events LIMIT 1")
-            start_time_type = cursor.fetchone()
-            
-            if start_time_type and start_time_type[0] == 'text':
-                logger.info("Converting start_time and end_time to TIMESTAMP format")
-                # Create a temporary table with the correct schema
-                cursor.execute("""
-                    CREATE TABLE events_temp (
-                        id INTEGER PRIMARY KEY,
-                        event_id TEXT UNIQUE NOT NULL,
-                        summary TEXT,
-                        description TEXT,
-                        location TEXT,
-                        calendar_id TEXT,
-                        start_time TIMESTAMP,
-                        end_time TIMESTAMP,
-                        project_id INTEGER,
-                        FOREIGN KEY (project_id) REFERENCES projects(id)
-                    )
-                """)
-                
-                # Copy data, converting datetime strings to proper datetime format
-                cursor.execute("""
-                    INSERT INTO events_temp (id, event_id, summary, description, location, calendar_id, start_time, end_time, project_id)
-                    SELECT id, event_id, summary, description, location, calendar_id, 
-                           datetime(start_time), datetime(end_time), project_id
-                    FROM events
-                """)
-                
-                # Drop old table and rename new one
-                cursor.execute("DROP TABLE events")
-                cursor.execute("ALTER TABLE events_temp RENAME TO events")
-                logger.info("Converted datetime columns to proper format")
-        except Exception as e:
-            logger.warning(f"Datetime conversion skipped: {e}")
-        
-        conn.commit()
-        conn.close()
-        logger.info("Database schema migration completed successfully")
-    except Exception as e:
-        logger.error(f"Database migration failed: {e}")
-        if 'conn' in locals():
-            conn.close()
-
-
 def init_db(db_path: str = DB_PATH) -> None:
     """Initialize the database and create tables if they don't exist."""
     logger.info(f"Initializing database: {os.path.basename(db_path)}")
     Base.metadata.create_all(bind=engine)
     logger.info(f"Database initialized at {os.path.abspath(db_path)}")
-    
-    # Run schema migrations
-    migrate_schema()
-    
-    # Add default projects if none exist
-    db = get_db_session()
-    project_count = db.query(ProjectModel).count()
-    db.close()
-    
-    if project_count == 0:
-        logger.info("Adding default projects...")
-        add_project("Work", 40, 1, "Work-related tasks and meetings")
-        add_project("Personal", 20, 2, "Personal tasks and events")
-        add_project("Study", 15, 3, "Learning and education")
-        logger.info("Default projects added")
 
 
 def get_db_session() -> Session:
@@ -560,9 +419,8 @@ if __name__ == "__main__":
     if project_count == 0:
         print("Adding sample projects...")
         add_project("Personal Development", 10, 2, "Skills development and learning")
-        add_project("Work ", None, 3, "Regular work")
-        add_project("family, friends, household", None, 3, "Stuff related to family, friends, or household")
+        add_project("Work", None, 3, "Regular work")
+        add_project("Family & Friends", None, 3, "Activities related to family, friends, or household")
         print("Sample projects added.")
         
-    rint("Done. You can now run the application with 'streamlit run app.py'.")
     print("Done. You can now run the application with 'streamlit run app.py'.")

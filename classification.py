@@ -6,10 +6,8 @@ Event classification module using DSPy and OpenAI to classify calendar events in
 import os
 import logging
 from typing import List, Optional, Tuple, Dict, Any
-import sqlite3
-from datetime import datetime, timedelta
-import random
-import threading
+import json
+from datetime import datetime
 
 import dspy
 import mlflow
@@ -34,9 +32,6 @@ EXPERIMENT_NAME = "DSPy Calendar Event Classification"
 
 # Classification configuration
 CONFIDENCE_THRESHOLD = 70.0  # Only accept classifications with confidence > 70%
-
-# Global variables for model tracking
-MODEL_DEPLOYED = None
 
 # Define a DSPy Signature for event classification
 class EventClassification(dspy.Signature):
@@ -106,33 +101,6 @@ def initialize_experiment():
     except Exception as e:
         logger.warning(f"Failed to initialize MLflow experiment: {e}")
 
-def deploy_model(lm: Optional[Any] = None):
-    """Deploy the classification model with the given language model."""
-    global MODEL_DEPLOYED
-    
-    # If model is already deployed, return
-    if MODEL_DEPLOYED is not None:
-        return
-    
-    # If no LM is provided, create a new one
-    if lm is None:
-        try:
-            # Create OpenAI LM with the configured model
-            lm = dspy.OpenAI(model=MODEL_NAME, api_key=API_KEY)
-            logger.info(f"Created new OpenAI LM with model: {MODEL_NAME}")
-        except Exception as e:
-            logger.error(f"Failed to create OpenAI LM: {e}")
-            return
-    
-    try:
-        # Create and compile the classifier
-        classifier = ProjectClassifier()
-        MODEL_DEPLOYED = classifier
-        logger.info("Classification model deployed successfully")
-    except Exception as e:
-        logger.error(f"Failed to deploy classification model: {e}")
-        MODEL_DEPLOYED = None
-
 # Initialize MLflow
 def init_mlflow():
     """
@@ -180,13 +148,11 @@ def configure_dspy(model_name: str = None, api_key: str = None) -> Optional[Any]
     Returns:
         The configured language model or None if configuration failed
     """
-    global MODEL_NAME, API_KEY
-    
     # Update global variables if provided
-    if model_name:
-        MODEL_NAME = model_name
-    if api_key:
-        API_KEY = api_key
+    global API_KEY, MODEL_NAME
+    
+    API_KEY = api_key or os.getenv("OPENAI_API_KEY", "")
+    MODEL_NAME = model_name or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     
     # Validate essential settings
     if not API_KEY:
@@ -195,15 +161,19 @@ def configure_dspy(model_name: str = None, api_key: str = None) -> Optional[Any]
     
     try:
         # Create the language model
-        lm = dspy.OpenAI(model=MODEL_NAME, api_key=API_KEY)
+        lm = dspy.LM(model=f"openai/{MODEL_NAME}", api_key=API_KEY)
         logger.info(f"DSPy configured with model: {MODEL_NAME}")
         
-        # Deploy the model
-        deploy_model(lm)
+        # Store the LM in the session state for future use
+        if 'st' in globals():
+            st.session_state.dspy_lm = lm
+            st.session_state.dspy_configured = True
+            st.session_state.dspy_model_name = MODEL_NAME
         
         return lm
     except Exception as e:
         logger.error(f"Error configuring DSPy: {e}")
+        logger.exception(str(e))
         return None
 
 def get_classify_module(lm=None):
@@ -262,7 +232,7 @@ def get_project_data() -> Tuple[Dict[str, int], List[str]]:
         - dict[str, int]: Mapping of project names (lowercase) to their IDs
         - list[str]: List of project names
     """
-    # Use the database module to get projects instead of direct sqlite3 access
+    # Use the database module to get projects
     projects = database.get_projects()
     
     if not projects:
@@ -300,8 +270,6 @@ def classify_event(
     Returns:
         Tuple of (project_id, confidence)
     """
-    global MODEL_DEPLOYED
-    
     # Validate inputs
     if not title and not description:
         logger.warning("Both title and description are empty. Cannot classify.")
@@ -311,8 +279,11 @@ def classify_event(
         logger.warning("No projects available for classification")
         return None, 0.0
     
-    # Make sure we have a deployed model
-    deploy_model(lm)
+    # Get the classification module
+    classifier = get_classify_module(lm)
+    if not classifier:
+        logger.error("Failed to create classification module")
+        return None, 0.0
     
     # Initialize MLflow tracking if needed
     initialize_experiment()
@@ -335,15 +306,19 @@ def classify_event(
                 event_text += f"Description: {description}\n"
                 
             # Run inference with the classifier
-            result = MODEL_DEPLOYED(event_text=event_text, project_names=project_names)
+            result = classifier(
+                event=event_text,
+                calendar="",
+                projects=", ".join(project_names)
+            )
             
             # Log the result
-            mlflow.log_param("predicted_project", result.project_name)
+            mlflow.log_param("predicted_project", result.project)
             mlflow.log_metric("confidence", result.confidence)
             
             # Get the project ID from the predicted name
-            predicted = result.project_name.lower()
-            confidence = result.confidence
+            predicted = result.project.lower()
+            confidence = result.confidence / 100.0  # Convert from percentage to 0-1 scale
             
             # Find the closest matching project - first check for exact match
             if predicted in project_ids:
@@ -381,8 +356,6 @@ def batch_classify_events(event_data: List[Dict[str, str]], lm: Optional[Any] = 
     Returns:
         Dictionary mapping event IDs to (project_id, confidence) tuples
     """
-    global MODEL_DEPLOYED
-    
     logger.info(f"Batch classifying {len(event_data)} events")
     
     # Initialize MLflow experiment and tracking
@@ -465,25 +438,22 @@ def update_event_with_classification(event_id: str, project_id: int, confidence:
     """
     try:
         # Get the event from the database to get its internal ID
-        session = database.get_db_session()
-        event = session.query(database.EventModel).filter(
+        db = database.get_db_session()
+        event = db.query(database.EventModel).filter(
             database.EventModel.event_id == event_id
         ).first()
-        session.close()
         
-        if event:
-            # Use the database function to update the event
-            return database.update_event_project(event.id, project_id)
-        else:
+        if not event:
             logger.warning(f"Event with ID {event_id} not found in database")
+            db.close()
             return False
+            
+        # Use the database function to update the event
+        db.close()
+        return database.update_event_project(event.id, project_id)
     except Exception as e:
         logger.error(f"Error updating event classification: {e}")
         return False
-
-def init_db():
-    """Initialize the database."""
-    database.init_db()
 
 def find_closest_name(target: str, options: List[str], threshold: float = 0.8) -> Optional[str]:
     """
@@ -527,7 +497,7 @@ def find_closest_name(target: str, options: List[str], threshold: float = 0.8) -
 # Add a test invocation at the end to run when the script is executed directly
 if __name__ == "__main__":
     # Initialize the database if running standalone
-    init_db()
+    database.init_db()
     
     # Test the classification with a sample event
     test_event = "Weekly team meeting with engineering"
@@ -536,7 +506,16 @@ if __name__ == "__main__":
     # Need to configure DSPy before calling classify_event
     lm = configure_dspy()
     if lm:
-        project_id, confidence = classify_event(test_event, lm=lm)
+        # Get project data for classification
+        project_ids, project_names = get_project_data()
+        
+        project_id, confidence = classify_event(
+            test_event, 
+            "",  # No description
+            project_names,
+            project_ids,
+            lm=lm
+        )
         
         if project_id is not None:
             print(f"Classification result: Project ID {project_id}, Confidence {confidence:.2f}%")
