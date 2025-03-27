@@ -19,3 +19,7 @@ dspy
 openai
 watchdog
 mlflow>=2.18.0
+# https://github.com/stanfordnlp/dspy/issues/7825
+sqlite=3.42.0
+
+

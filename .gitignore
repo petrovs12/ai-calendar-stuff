@@ -166,3 +166,6 @@ credentials.json
 mlflow/
 mlruns/
 py310env/
+*.db
+
+mlartifacts/

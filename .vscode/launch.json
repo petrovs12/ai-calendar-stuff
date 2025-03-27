@@ -1,0 +1,46 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        
+        {
+            "name": "Python Debugger: FastAPI",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": [
+                "app:app",
+                "--reload"
+            ],
+            "jinja": true
+        },
+        {
+            "name": "Streamlit",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "streamlit",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "jinja": true,
+            "args": [
+                "run",
+                "app.py",
+            ]
+        },
+        {
+            "name": "MLflow UI",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "mlflow",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [
+                "ui",
+                "--host", "127.0.0.1",
+                "--port", "5000"
+            ]
+        }
+    ]
+}

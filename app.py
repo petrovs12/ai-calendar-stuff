@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import pandas as pd
+import os
 
 # Local module imports
 import google_calendar
@@ -14,6 +15,64 @@ import classification  # Import the classification module
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# DSPy Configuration Section
+with st.sidebar:
+    st.header("DSPy Configuration")
+    
+    # Model selection
+    model_name = st.text_input(
+        "OpenAI Model Name",
+        value=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        help="Enter the OpenAI model name (e.g., gpt-4o-mini)"
+    )
+    
+    # API key input
+    api_key = st.text_input(
+        "OpenAI API Key",
+        type="password",
+        value=os.getenv("OPENAI_API_KEY", ""),
+        help="Enter your OpenAI API key"
+    )
+    
+    # Only show configure button if not already configured
+    if not st.session_state.get('dspy_configured', False):
+        # Configure button
+        if st.button("Configure DSPy"):
+            with st.spinner("Configuring DSPy..."):
+                lm = classification.configure_dspy(model_name, api_key)
+                if lm is not None:
+                    st.success("DSPy configured successfully!")
+                else:
+                    st.error("Failed to configure DSPy. Please check your API key and try again.")
+    else:
+        st.success(f"DSPy configured with model: {st.session_state.get('dspy_model_name', 'unknown')}")
+        
+        # Add button to reconfigure if needed
+        if st.button("Reconfigure"):
+            # Clear previous configuration
+            if 'dspy_lm' in st.session_state:
+                del st.session_state.dspy_lm
+            if 'dspy_configured' in st.session_state:
+                st.session_state.dspy_configured = False
+            st.rerun()
+
+# MLflow Information
+st.sidebar.header("MLflow Tracking")
+MLFLOW_PORT = 5000
+MLFLOW_URL = f"http://127.0.0.1:{MLFLOW_PORT}"
+st.sidebar.info(f"MLflow UI: [Open MLflow Dashboard]({MLFLOW_URL})")
+
+# Check if MLflow server is running
+try:
+    import requests
+    mlflow_status = requests.get(MLFLOW_URL, timeout=1)
+    if mlflow_status.status_code == 200:
+        st.sidebar.success("MLflow server is running")
+    else:
+        st.sidebar.warning(f"MLflow server returned status code: {mlflow_status.status_code}")
+except:
+    st.sidebar.error("MLflow server is not running. Please start it with 'mlflow ui'")
 
 def store_events_in_db(events, db_path="planner.db"): 
     """Store calendar events in the SQLite database using the events table defined in database.py."""
@@ -122,31 +181,56 @@ def update_event_project(event_id, project_id):
 def auto_classify_events(limit=1000):
     """Auto-classify unclassified events using the classification module."""
     try:
-        # Import the classification module
-        import classification
+        # Check if DSPy is configured
+        if 'dspy_lm' not in st.session_state:
+            logger.warning("DSPy not configured. Please configure DSPy first.")
+            return []
+        
+        # Get the LM from session state
+        lm = st.session_state.dspy_lm
         
         # Get unclassified events
         unclassified_events = get_unclassified_events(limit)
         classified_events = get_classified_events(limit)
         
-        results = []
+        if not unclassified_events:
+            logger.info("No unclassified events to process")
+            return []
+        
+        logger.info(f"Found {len(unclassified_events)} unclassified events")
+        
+        # Prepare events for batch classification
+        event_data_list = []
         for event in unclassified_events:
             event_id, google_event_id, title, description, start_time, end_time, calendar_id = event
+            event_data_list.append({
+                'id': event_id,
+                'title': title,
+                'description': description,
+                'calendar_id': calendar_id
+            })
+        
+        # Use batch classification to get all results
+        batch_results = classification.batch_classify_events(
+            event_data_list,
+            lm=lm,
+            run_name=f"app_classify_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        
+        # Process the classification results
+        results = []
+        for event_id, (project_id, confidence) in batch_results.items():
+            # Get the event details for the result entry
+            event_data = next((e for e in event_data_list if e['id'] == event_id), None)
+            title = event_data['title'] if event_data else f"Event {event_id}"
             
-            # Try to classify the event
-            try:
-                project_id, confidence = classification.classify_event(title, description)
-                
-                if project_id:
-                    # Update the event with the classified project
-                    update_event_project(event_id, project_id)
-                    results.append((event_id, project_id, title, confidence))
-                else:
-                    # Could not classify or low confidence
-                    results.append((event_id, None, title, 0.0))
-            except Exception as e:
-                logger.error(f"Error classifying event {event_id}: {e}")
-                results.append((event_id, None, title, 0.0))
+            if project_id:
+                # Update the event with the classified project
+                classification.update_event_with_classification(event_id, project_id)
+                results.append((event_id, project_id, title, confidence))
+            else:
+                # Could not classify or low confidence
+                results.append((event_id, None, title, confidence))
         
         return results
     except Exception as e:
@@ -366,7 +450,7 @@ elif active_tab == "Classification":
     st.write("Classify your calendar events into projects for better organization and scheduling.")
     
     # Create sidebar menu for classification tab
-    classification_options = ["Manual Classification", "Auto-Classification", "Classified Events"]
+    classification_options = ["Manual Classification", "Auto-Classification", "Classified Events", "MLflow Testing"]
     classification_selection = st.sidebar.radio(
         "Classification Options", 
         classification_options, 
@@ -463,7 +547,6 @@ elif active_tab == "Classification":
         st.write("Use AI to automatically classify events based on their titles and descriptions.")
         
         # Check if OpenAI API key is configured
-        import os
         openai_key = os.getenv("OPENAI_API_KEY", "")
         if not openai_key:
             st.warning("OpenAI API key not found in environment variables. Auto-classification requires this to be set.")
@@ -554,6 +637,41 @@ elif active_tab == "Classification":
                                 with st.expander("Description"):
                                     st.write(description)
                             st.divider()
+    
+    elif classification_selection == "MLflow Testing":
+        st.subheader("MLflow Testing")
+        st.write("Test the MLflow connection and view experiments.")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("Test MLflow Connection", type="primary"):
+                with st.spinner("Testing MLflow connection..."):
+                    # Import the test_mlflow function from tests
+                    from tests.test_classification import test_mlflow
+                    # Call the test_mlflow function
+                    if test_mlflow():
+                        st.success("MLflow test successful! A test run has been created.")
+                        # Create a link to view the test run
+                        mlflow_url = classification.MLFLOW_TRACKING_URI
+                        st.markdown(f"[View MLflow Dashboard]({mlflow_url})")
+                    else:
+                        st.error("MLflow test failed. Is the MLflow server running?")
+                        st.info("Run the following command in a terminal to start MLflow:\n\n`mlflow ui`")
+        
+        with col2:
+            if st.button("Create Test Experiment"):
+                with st.spinner("Creating test experiment..."):
+                    # Import the create_test_experiment function from tests
+                    from tests.test_classification import create_test_experiment
+                    # Call the create_test_experiment function
+                    create_test_experiment()
+                    st.success("Test experiment created!")
+                    
+                    # Create a link to view the experiment
+                    experiment_id = classification.EXPERIMENT_NAME
+                    mlflow_url = classification.MLFLOW_TRACKING_URI
+                    st.markdown(f"[View Experiment: {experiment_id}]({mlflow_url}/#/experiments/)")
 
 elif active_tab == "Projects":
     st.header("Projects Management")

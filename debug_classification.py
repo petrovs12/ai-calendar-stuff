@@ -99,7 +99,6 @@ def setup_dspy():
     # Define the DSPy signature for event classification
     class ClassifyEvent(dspy.Signature):
         """Classify calendar events into projects based on their title and description."""
-        
         event_title = dspy.InputField(desc="The title of the calendar event")
         event_description = dspy.InputField(desc="The description of the calendar event (might be empty)")
         project_names = dspy.InputField(desc="List of available project names to classify the event into")
@@ -107,7 +106,7 @@ def setup_dspy():
         project_name = dspy.OutputField(desc="The most likely project name for this event, or 'unknown' if it doesn't match any project")
         confidence = dspy.OutputField(desc="The confidence percentage (0-100) in this classification")
         explanation = dspy.OutputField(desc="A brief explanation of why this project was chosen")
-    
+   
     # Create a predictor using the signature
     predictor = dspy.Predict(ClassifyEvent)
     
