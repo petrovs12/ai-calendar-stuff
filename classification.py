@@ -38,6 +38,7 @@ CONFIDENCE_THRESHOLD = 70.0  # Only accept classifications with confidence > 70%
 class EventClassification(dspy.Signature):
     """Classify a calendar event into one of the given project names or 'Unknown'."""
     event: str = dspy.InputField(desc="The event title and description text")
+    calendar: str = dspy.InputField(desc="The calendar ID of the event")
     projects: str = dspy.InputField(desc="Comma-separated list of existing project names")
     project: str = dspy.OutputField(desc="Predicted project name (or 'unknown' if it doesn't match any project)")
     confidence: float = dspy.OutputField(desc="Confidence percentage (0-100) in this classification")
@@ -190,7 +191,7 @@ def get_project_data() -> tuple[dict[str, int], list[str]]:
     
     return project_ids, project_names
 
-def classify_event(event_title: str, event_description: str = "", event_calendar: str = "", lm=None) -> Tuple[Optional[int], float]:
+def classify_event(event_title: str, event_description: str = "", event_calendar: str = "", event_start_time: str = "", lm=None) -> Tuple[Optional[int], float]:
     """
     Classify a calendar event into a project based on its title and description.
     
@@ -198,6 +199,7 @@ def classify_event(event_title: str, event_description: str = "", event_calendar
         event_title: The title of the event
         event_description: The description of the event (optional)
         event_calendar: The calendar ID the event belongs to (optional)
+        event_start_time: The start time of the event in ISO format (optional)
         lm: The language model to use (optional, defaults to session state LM)
         
     Returns:
@@ -232,15 +234,40 @@ def classify_event(event_title: str, event_description: str = "", event_calendar
     # Define projects_list for the classification
     projects_list = ", ".join(project_names)
     
+    # Extract day of week and time of day from start time
+    day_of_week = "Unknown"
+    time_of_day = "Unknown"
+    iso_time = event_start_time
+    if event_start_time:
+        try:
+            start_dt = datetime.fromisoformat(event_start_time.replace('Z', '+00:00'))
+            day_of_week = start_dt.strftime("%A")
+            hour = start_dt.hour
+            if 5 <= hour < 12:
+                time_of_day = "morning"
+            elif 12 <= hour < 17:
+                time_of_day = "afternoon"
+            else:
+                time_of_day = "evening"
+        except Exception as e:
+            logger.warning(f"Could not parse event start time: {e}")
+    
     try:
         # Make the prediction
         logger.info(f"Sending classification request to OpenAI with {len(project_names)} projects")
         
         # Log the exact input being sent to the model
-        logger.debug(f"Classification input: event='{input_text}', projects='{projects_list}'")
+        logger.debug(f"Classification input: event='{input_text}', calendar='{event_calendar}', iso_time='{iso_time}', day='{day_of_week}', time='{time_of_day}', projects='{projects_list}'")
         
         # Make the prediction
-        result = classify_module(event=input_text, projects=projects_list)
+        result = classify_module(
+            event=input_text,
+            calendar=event_calendar,
+            iso_time=iso_time,
+            day_of_week=day_of_week,
+            time_of_day=time_of_day,
+            projects=projects_list
+        )
         
         # Log the raw result for debugging
         logger.debug(f"Raw classification result: {result}")

@@ -23,65 +23,57 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 def test_classification_system():
-    """
-    Test the classification system with a few sample events.
-    This function is meant to be run manually for testing purposes.
-    """
-    logger.info("===== TESTING CLASSIFICATION SYSTEM =====")
+    """Test the classification system with sample events."""
+    logger.info("===== STARTING CLASSIFICATION SYSTEM TEST =====")
     
-    # First, ensure the database is initialized
-    database.init_db()
+    # 1. Initialize database
+    logger.info("Initializing database...")
+    classification.init_db()
     
-    # 1. Check for existing projects
+    # 2. Create test projects if they don't exist
     conn = sqlite3.connect(database.DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM projects")
-    existing_projects = cursor.fetchall()
     
-    # Create test projects if none exist
-    if not existing_projects:
-        logger.info("No projects found, creating test projects")
-        test_projects = [
-            ("Work", "Work related activities and meetings"),
-            ("Personal", "Personal appointments and events"),
-            ("Learning", "Educational activities and courses"),
-            ("Health", "Health and fitness related activities"),
-            ("Family", "Family events and commitments")
-        ]
-        
-        for name, desc in test_projects:
-            cursor.execute("INSERT INTO projects (name, description) VALUES (?, ?)", (name, desc))
+    test_projects = [
+        ("Work", 40, 1, "Work-related activities"),
+        ("Health", 5, 2, "Health and fitness activities"),
+        ("Learning", 10, 3, "Learning and education activities"),
+        ("Personal", 5, 4, "Personal activities"),
+        ("Family", 10, 5, "Family-related activities")
+    ]
+    
+    for name, hours, priority, desc in test_projects:
+        cursor.execute("SELECT id FROM projects WHERE name = ?", (name,))
+        if not cursor.fetchone():
+            cursor.execute("""
+                INSERT INTO projects (name, estimated_hours, priority, description)
+                VALUES (?, ?, ?, ?)
+            """, (name, hours, priority, desc))
             logger.info(f"Created test project: {name}")
-        
-        conn.commit()
-        cursor.execute("SELECT id, name FROM projects")
-        existing_projects = cursor.fetchall()
     
-    logger.info(f"Found {len(existing_projects)} projects in database")
+    conn.commit()
     
-    # 2. Create some test events if we don't have any
+    # 3. Create test events if none exist
     cursor.execute("SELECT COUNT(*) FROM events")
-    event_count = cursor.fetchone()[0]
-    
-    if event_count == 0:
+    if cursor.fetchone()[0] == 0:
         logger.info("No events found, creating test events")
         test_events = [
-            ("Team Meeting", "Weekly team sync with engineering team", "Work"),
-            ("Dentist Appointment", "Routine checkup with Dr. Smith", "Health"),
-            ("Python Course", "Advanced Python programming webinar", "Learning"),
-            ("Grocery Shopping", "Buy weekly groceries from Whole Foods", "Personal"),
-            ("Family Dinner", "Dinner with parents at their house", "Family")
+            ("Team Meeting", "Weekly team sync with engineering team", "Work", "2024-03-20T10:00:00"),
+            ("Dentist Appointment", "Routine checkup with Dr. Smith", "Health", "2024-03-21T14:00:00"),
+            ("Python Course", "Advanced Python programming webinar", "Learning", "2024-03-22T19:00:00"),
+            ("Grocery Shopping", "Buy weekly groceries from Whole Foods", "Personal", "2024-03-23T09:00:00"),
+            ("Family Dinner", "Dinner with parents at their house", "Family", "2024-03-24T18:00:00")
         ]
         
         # Insert test events
-        for title, desc, project_name in test_events:
+        for title, desc, project_name, start_time in test_events:
             # Get project ID
             cursor.execute("SELECT id FROM projects WHERE name = ?", (project_name,))
             project_id = cursor.fetchone()[0]
             
             # Create event
-            start_time = datetime.now() + timedelta(days=random.randint(1, 30))
-            end_time = start_time + timedelta(hours=1)
+            start_dt = datetime.fromisoformat(start_time)
+            end_time = start_dt + timedelta(hours=1)
             
             cursor.execute("""
                 INSERT INTO events 
@@ -90,7 +82,7 @@ def test_classification_system():
             """, (
                 title, 
                 desc, 
-                start_time.isoformat(), 
+                start_dt.isoformat(), 
                 end_time.isoformat(), 
                 project_id,
                 "test-calendar@example.com"
@@ -103,11 +95,11 @@ def test_classification_system():
     # 4. Test classification with new events
     logger.info("Testing classification with new events...")
     test_classifications = [
-        "Quarterly Business Review with leadership team",
-        "Yoga class at the gym",
-        "Meeting with Python Study Group",
-        "Birthday party for Mom",
-        "Doctor appointment for annual physical"
+        ("Quarterly Business Review with leadership team", "2024-03-25T10:00:00"),
+        ("Yoga class at the gym", "2024-03-26T07:00:00"),
+        ("Meeting with Python Study Group", "2024-03-27T19:00:00"),
+        ("Birthday party for Mom", "2024-03-28T18:00:00"),
+        ("Doctor appointment for annual physical", "2024-03-29T14:00:00")
     ]
     
     # Configure DSPy first
@@ -116,8 +108,13 @@ def test_classification_system():
         logger.error("Failed to configure DSPy. Test cannot continue.")
         return
     
-    for test_event in test_classifications:
-        project_id, confidence = classification.classify_event(test_event, lm=lm)
+    for test_event, start_time in test_classifications:
+        project_id, confidence = classification.classify_event(
+            test_event,
+            event_start_time=start_time,
+            event_calendar="test-calendar@example.com",
+            lm=lm
+        )
         
         if project_id:
             cursor.execute("SELECT name FROM projects WHERE id = ?", (project_id,))

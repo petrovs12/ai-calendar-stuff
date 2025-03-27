@@ -25,7 +25,7 @@ def main():
     elif args.test == "mlflow":
         print("Testing MLflow configuration...")
         if test_mlflow():
-            print("MLflow test successful! MLflow is configured and ready.")
+            print("MLflow test successful!")
         else:
             print("MLflow test failed. Check logs for details.")
     elif args.test == "experiment":
