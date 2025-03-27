@@ -289,60 +289,56 @@ def classify_event(
     initialize_experiment()
     
     # Create a descriptive run name
-    run_name = f"classify_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # run_name = f"classify_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     # Start a new MLflow run
-    with mlflow.start_run(run_name=run_name) as run:
+    # with mlflow.start_run(run_name=run_name,nested=True) as run:
         # Log parameters
-        mlflow.log_param("title", title[:100] if title else "")
-        mlflow.log_param("description", description[:100] if description else "")
-        mlflow.log_param("model_name", MODEL_NAME)
-        
-        # Wrap API calls in try-except for robustness
-        try:
-            # Combine title and description for the event text
-            event_text = f"Title: {title}\n"
-            if description:
-                event_text += f"Description: {description}\n"
+    # Wrap API calls in try-except for robustness
+    try:
+        # Combine title and description for the event text
+        event_text = f"Title: {title}\n"
+        if description:
+            event_text += f"Description: {description}\n"
                 
             # Run inference with the classifier
-            result = classifier(
+        result = classifier(
                 event=event_text,
                 calendar="",
                 projects=", ".join(project_names)
-            )
+        )
             
-            # Log the result
-            mlflow.log_param("predicted_project", result.project)
-            mlflow.log_metric("confidence", result.confidence)
+        # Log the result
+        # mlflow.log_param("predicted_project", result.project)
+        # mlflow.log_metric("confidence", result.confidence)
             
-            # Get the project ID from the predicted name
-            predicted = result.project.lower()
-            confidence = result.confidence / 100.0  # Convert from percentage to 0-1 scale
+        # Get the project ID from the predicted name
+        predicted = result.project.lower()
+        confidence = result.confidence / 100.0  # Convert from percentage to 0-1 scale
             
-            # Find the closest matching project - first check for exact match
-            if predicted in project_ids:
-                project_id = project_ids[predicted]
-                logger.info(f"Classified event to project: {predicted} (ID: {project_id}, Confidence: {confidence:.0%})")
-                return project_id, confidence
+        # Find the closest matching project - first check for exact match
+        if predicted in project_ids:
+            project_id = project_ids[predicted]
+            logger.info(f"Classified event to project: {predicted} (ID: {project_id}, Confidence: {confidence:.0%})")
+            return project_id, confidence
                 
-            # If no exact match, try to find the closest name
-            # This is useful for handling minor differences in text
-            closest_name = find_closest_name(predicted, list(project_ids.keys()))
-            if closest_name:
-                project_id = project_ids[closest_name]
-                logger.info(f"Using closest match: '{closest_name}' for '{predicted}' (ID: {project_id})")
-                return project_id, confidence
+        # If no exact match, try to find the closest name
+        # This is useful for handling minor differences in text
+        closest_name = find_closest_name(predicted, list(project_ids.keys()))
+        if closest_name:
+            project_id = project_ids[closest_name]
+            logger.info(f"Using closest match: '{closest_name}' for '{predicted}' (ID: {project_id})")
+            return project_id, confidence
                 
             # No match found
             logger.warning(f"No matching project found for '{predicted}'")
             return None, confidence
             
-        except Exception as e:
-            # Log the error
-            logger.error(f"Classification error: {e}")
-            mlflow.log_param("error", str(e)[:200])
-            return None, 0.0
+    except Exception as e:
+        # Log the error
+        # logger.error(f"Classification error: {e}")
+        # mlflow.log_param("error", str(e)[:200])
+        return None, 0.0
 
 def batch_classify_events(event_data: List[Dict[str, str]], lm: Optional[Any] = None, run_name: Optional[str] = None) -> Dict[str, Tuple[Optional[int], float]]:
     """
@@ -361,68 +357,49 @@ def batch_classify_events(event_data: List[Dict[str, str]], lm: Optional[Any] = 
     # Initialize MLflow experiment and tracking
     initialize_experiment()
     
-    # Start a new MLflow run
-    run_name = run_name or f"batch_classify_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    with mlflow.start_run(run_name=run_name) as run:
-        # Log run info
-        mlflow.log_param("event_count", len(event_data))
-        mlflow.log_param("model_name", MODEL_NAME)
+    # Initialize results
+    results: Dict[str, Tuple[Optional[int], float]] = {}
+    
+    # Get project data
+    project_ids, project_names = get_project_data()
         
-        # Initialize results
-        results: Dict[str, Tuple[Optional[int], float]] = {}
+    # Check if we have projects to classify events
+    if not project_names:
+        logger.warning("No projects available for classification")
+        mlflow.log_param("status", "failed_no_projects")
+        return results
         
-        # Get project data
-        project_ids, project_names = get_project_data()
-        
-        # Check if we have projects to classify events
-        if not project_names:
-            logger.warning("No projects available for classification")
-            mlflow.log_param("status", "failed_no_projects")
-            return results
-        
-        # Process each event in the batch
-        for idx, event in enumerate(event_data):
-            event_id = event.get('id')
-            title = event.get('title', '')
-            description = event.get('description', '')
+    # Process each event in the batch
+    for idx, event in enumerate(event_data):
+        event_id = event.get('id')
+        title = event.get('title', '')
+        description = event.get('description', '')
             
-            # Log event info for tracking
-            mlflow.log_param(f"event_{idx}_id", event_id)
-            mlflow.log_param(f"event_{idx}_title", title[:50] if title else "")
-            
-            try:
-                # Call classify_event with the event data
-                project_id, confidence = classify_event(
-                    title, 
-                    description, 
-                    project_names,
-                    project_ids,
-                    lm=lm
-                )
+        try:
+            # Call classify_event with the event data
+            project_id, confidence = classify_event(
+                title, 
+                description, 
+                project_names,
+                project_ids,
+                lm=lm
+            )
                 
-                # Update the database with the classification result
-                if project_id is not None:
-                    update_event_with_classification(event_id, project_id, confidence)
+            # Update the database with the classification result
+            if project_id is not None:
+                update_event_with_classification(event_id, project_id, confidence)
                 
                 # Store the result
                 results[event_id] = (project_id, confidence)
                 
-                # Log the result
-                mlflow.log_metric(f"event_{idx}_confidence", confidence)
-                mlflow.log_param(f"event_{idx}_project_id", project_id if project_id else "none")
-                
-            except Exception as e:
-                logger.error(f"Error classifying event {event_id}: {e}")
-                mlflow.log_param(f"event_{idx}_error", str(e)[:100])
-                results[event_id] = (None, 0.0)
-        
-        # Log overall results
-        classified_count = sum(1 for pid, _ in results.values() if pid is not None)
-        mlflow.log_metric("classified_count", classified_count)
-        mlflow.log_metric("classification_rate", classified_count / len(event_data) if event_data else 0)
-        
-        logger.info(f"Batch classification complete: {classified_count}/{len(event_data)} events classified")
-        return results
+        except Exception as e:
+            logger.error(f"Error classifying event {event_id}: {e}")
+            results[event_id] = (None, 0.0)
+    
+    # Log overall results
+    classified_count = sum(1 for pid, _ in results.values() if pid is not None)
+    logger.info(f"Batch classification complete: {classified_count}/{len(event_data)} events classified")
+    return results
 
 def update_event_with_classification(event_id: str, project_id: int, confidence: Optional[float] = None) -> bool:
     """
